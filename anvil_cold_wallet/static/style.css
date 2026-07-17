@@ -163,6 +163,11 @@ input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
 .mode-chip { padding: 6px 9px; border: 1px solid rgba(121,170,255,.28); background: rgba(121,170,255,.08); color: var(--blue); border-radius: 999px; font-size: 11px; font-weight: 800; }
 .signer-mode { margin: 16px 0 4px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; background: #0c1117; color: var(--muted); font-size: 12px; }
 .signer-mode.c-active { color: var(--accent); border-color: rgba(101,240,181,.28); background: rgba(101,240,181,.06); }
+.signer-mode.fpga-active { color: var(--blue); border-color: rgba(121,170,255,.35); background: rgba(121,170,255,.08); }
+.hardware-status { margin: 8px 0 0; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.hardware-status.online { color: var(--accent); }
+.hardware-status.offline { color: #ff8f8f; }
+.hardware-status.checking { color: var(--warning); }
 .amount-input { position: relative; }
 .amount-input input { padding-right: 62px; font-size: 20px; font-weight: 700; }
 .amount-input span { position: absolute; right: 14px; top: 14px; color: var(--muted); font-size: 13px; font-weight: 800; }

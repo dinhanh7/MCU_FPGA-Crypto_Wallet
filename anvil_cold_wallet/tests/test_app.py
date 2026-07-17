@@ -5,11 +5,42 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from eth_account import Account
+from eth_keys import keys
 from web3 import Web3
 
 from app import create_app
+
+
+TEST_FPGA_KEY = bytes.fromhex(
+    "cf441a9aa8fa75a2822ab42be53155f6c99a95dfba39bb864348fdaea7f4ce88"
+)
+
+
+class FakeFpgaUartSigner:
+    def __init__(self, path: str, timeout: float = 3.0):
+        self.path = path
+        self.timeout = timeout
+        self.private_key = keys.PrivateKey(TEST_FPGA_KEY)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return None
+
+    def ping(self) -> None:
+        return None
+
+    def sign_hash(self, message_hash: bytes) -> dict[str, int]:
+        signature = self.private_key.sign_msg_hash(message_hash)
+        return {
+            "yParity": signature.v,
+            "r": signature.r,
+            "s": signature.s,
+        }
 
 
 class WebInterfaceTest(unittest.TestCase):
@@ -26,9 +57,53 @@ class WebInterfaceTest(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Anvil Cold Wallet", response.data)
+        self.assertIn(b"Gowin FPGA", response.data)
         self.assertEqual(response.headers["Cache-Control"], "no-store, max-age=0")
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
+
+    def test_fpga_status_and_sign_flow(self) -> None:
+        self.app.config["FPGA_UART_PORT"] = "/dev/fake-fpga"
+        sender = Account.from_key(TEST_FPGA_KEY).address
+        unsigned = {
+            "format": "anvil-cold-wallet-unsigned-v1",
+            "from": sender,
+            "transaction": {
+                "type": 2,
+                "chainId": 31338,
+                "nonce": 0,
+                "maxPriorityFeePerGas": 1_000_000_000,
+                "maxFeePerGas": 2_000_000_000,
+                "gas": 21000,
+                "to": Account.create().address,
+                "value": 123456789,
+                "data": "0x",
+            },
+            "display": {},
+        }
+
+        with patch("app.FpgaUartSigner", FakeFpgaUartSigner):
+            signer_info = self.client.get("/api/fpga-signer")
+            self.assertEqual(signer_info.status_code, 200)
+            info = signer_info.get_json()
+            self.assertTrue(info["available"])
+            self.assertEqual(info["address"], sender)
+            self.assertEqual(info["baudRate"], 115200)
+
+            signed_response = self.client.post(
+                "/api/sign-fpga", json={"unsigned": unsigned}
+            )
+
+        self.assertEqual(signed_response.status_code, 200)
+        signed = signed_response.get_json()["signed"]
+        expected = Account.sign_transaction(unsigned["transaction"], TEST_FPGA_KEY)
+        self.assertEqual(signed["from"], sender)
+        self.assertEqual(
+            signed["rawTransaction"], "0x" + bytes(expected.raw_transaction).hex()
+        )
+        self.assertEqual(
+            signed["signature"]["implementation"], "Gowin ACG525 UART"
+        )
 
     def test_rejects_unsafe_wallet_name(self) -> None:
         response = self.client.post(

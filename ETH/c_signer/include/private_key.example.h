@@ -1,8 +1,0 @@
-#ifndef ETH_SIGNER_PRIVATE_KEY_H
-#define ETH_SIGNER_PRIVATE_KEY_H
-
-/* Test key only. Use exactly 64 hexadecimal characters, without 0x. */
-#define ETH_PRIVATE_KEY_HEX \
-    "0000000000000000000000000000000000000000000000000000000000000001"
-
-#endif

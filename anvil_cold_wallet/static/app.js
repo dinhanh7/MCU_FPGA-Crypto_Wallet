@@ -6,6 +6,7 @@ const state = {
   signed: null,
   broadcasted: false,
   cSigner: null,
+  fpgaSigner: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -87,12 +88,14 @@ async function checkNetwork() {
 
 async function refreshWallets(selectName = null) {
   try {
-    const [result, cSignerResult] = await Promise.all([
+    const [result, cSignerResult, fpgaSignerResult] = await Promise.all([
       api("/api/wallets", null, "GET"),
       api("/api/c-signer", null, "GET"),
+      api("/api/fpga-signer", null, "GET"),
     ]);
     state.wallets = result.wallets;
     state.cSigner = cSignerResult.available ? cSignerResult : null;
+    state.fpgaSigner = fpgaSignerResult.available ? fpgaSignerResult : null;
     if (state.cSigner) {
       state.wallets.push({
         name: "__c_signer__",
@@ -100,6 +103,20 @@ async function refreshWallets(selectName = null) {
         type: "c",
       });
     }
+    if (state.fpgaSigner) {
+      state.wallets.push({
+        name: "__fpga_signer__",
+        address: state.fpgaSigner.address,
+        type: "fpga",
+      });
+    }
+    const hardwareStatus = $("hardwareStatus");
+    hardwareStatus.classList.toggle("online", Boolean(state.fpgaSigner));
+    hardwareStatus.classList.toggle("offline", !state.fpgaSigner);
+    hardwareStatus.classList.remove("checking");
+    hardwareStatus.textContent = state.fpgaSigner
+      ? `FPGA online · ${state.fpgaSigner.port} · ${state.fpgaSigner.baudRate} baud`
+      : `FPGA offline · ${fpgaSignerResult.error || fpgaSignerResult.port}`;
     const select = $("walletSelect");
     const current = selectName || select.value;
     select.innerHTML = '<option value="">Chọn encrypted keystore</option>';
@@ -108,7 +125,9 @@ async function refreshWallets(selectName = null) {
       option.value = wallet.name;
       option.textContent = wallet.type === "c"
         ? `C offline signer · ${shortAddress(wallet.address)}`
-        : `${wallet.name} · ${shortAddress(wallet.address)}`;
+        : wallet.type === "fpga"
+          ? `Gowin ACG525 FPGA · ${shortAddress(wallet.address)}`
+          : `${wallet.name} · ${shortAddress(wallet.address)}`;
       select.appendChild(option);
     }
     if (state.wallets.some((wallet) => wallet.name === current)) {
@@ -133,16 +152,22 @@ function updateWalletSummary() {
     : "Chọn ví để tự động cập nhật số dư";
   $("walletSummary").classList.toggle("empty", !wallet);
   const cSelected = wallet?.type === "c";
-  $("passwordSigningFields").classList.toggle("hidden", cSelected);
+  const fpgaSelected = wallet?.type === "fpga";
+  $("passwordSigningFields").classList.toggle("hidden", cSelected || fpgaSelected);
   $("signerMode").classList.toggle("c-active", cSelected);
-  $("signerMode").textContent = cSelected
+  $("signerMode").classList.toggle("fpga-active", fpgaSelected);
+  $("signerMode").textContent = fpgaSelected
+    ? `FPGA signer · ${state.fpgaSigner.port} · hash được ký trong Gowin ACG525`
+    : cSelected
     ? "C signer · private key được compile trong binary riêng"
     : wallet
       ? "Python signer · encrypted keystore"
       : "Chọn signer để ký giao dịch";
-  $("signButton").textContent = cSelected
-    ? "2. Ký bằng C offline signer"
-    : "2. Kiểm tra và ký offline";
+  $("signButton").textContent = fpgaSelected
+    ? "2. Ký bằng FPGA qua UART"
+    : cSelected
+      ? "2. Ký bằng C offline signer"
+      : "2. Kiểm tra và ký offline";
 }
 
 async function createWallet() {
@@ -274,19 +299,23 @@ function renderUnsigned() {
 
 async function signUnsigned() {
   if (!state.unsigned || !selectedWallet()) return;
-  const cSelected = selectedWallet() === "__c_signer__";
+  const wallet = state.wallets.find((item) => item.name === selectedWallet());
+  const cSelected = wallet?.type === "c";
+  const fpgaSelected = wallet?.type === "fpga";
   const password = $("signPassword").value;
-  if (!cSelected && !password) {
+  if (!cSelected && !fpgaSelected && !password) {
     toast("Nhập mật khẩu keystore", true);
     return;
   }
   if (!window.confirm("Bạn đã kiểm tra địa chỉ nhận, số ETH, Chain ID và phí tối đa?")) return;
   const button = $("signButton");
-  setBusy(button, true);
+  setBusy(button, true, fpgaSelected ? "FPGA đang ký…" : "Đang ký…");
   try {
-    const result = cSelected
-      ? await api("/api/sign-c", { unsigned: state.unsigned })
-      : await api("/api/sign", {
+    const result = fpgaSelected
+      ? await api("/api/sign-fpga", { unsigned: state.unsigned })
+      : cSelected
+        ? await api("/api/sign-c", { unsigned: state.unsigned })
+        : await api("/api/sign", {
           wallet: selectedWallet(),
           password,
           unsigned: state.unsigned,
@@ -295,7 +324,12 @@ async function signUnsigned() {
     state.broadcasted = false;
     $("signPassword").value = "";
     updateActionButtons();
-    log(cSelected ? "C signer đã ký và recover kiểm tra chữ ký" : "Đã ký và tự kiểm tra chữ ký", {
+    const signedMessage = fpgaSelected
+      ? "FPGA đã ký qua UART và recover kiểm tra chữ ký"
+      : cSelected
+        ? "C signer đã ký và recover kiểm tra chữ ký"
+        : "Đã ký và tự kiểm tra chữ ký";
+    log(signedMessage, {
       from: state.signed.from,
       transactionHash: state.signed.transactionHash,
       signature: state.signed.signature || "Python/eth-account",

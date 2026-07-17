@@ -27,8 +27,8 @@
             <p class="eyebrow">SIGN LOCALLY · BROADCAST GLOBALLY</p>
             <h2>Kiểm soát private key.<br>Không gửi nó lên blockchain.</h2>
             <p class="hero-copy">
-              Tạo giao dịch trên Anvil, kiểm tra từng trường, ký từ keystore mã hóa
-              và chỉ broadcast raw transaction đã ký.
+              Tạo giao dịch trên Anvil, kiểm tra từng trường, ký từ keystore, C signer
+              hoặc Gowin FPGA và chỉ broadcast raw transaction đã ký.
             </p>
           </div>
           <div class="security-callout">
@@ -63,8 +63,8 @@
           <section class="card">
             <div class="section-heading">
               <div>
-                <p class="step-label">01 · KEYSTORE</p>
-                <h3>Quản lý ví</h3>
+                <p class="step-label">01 · SIGNER</p>
+                <h3>Chọn bộ ký</h3>
               </div>
               <button id="refreshWalletsButton" class="icon-button" type="button" title="Tải lại">↻</button>
             </div>
@@ -73,6 +73,7 @@
             <select id="walletSelect">
               <option value="">Chưa có ví</option>
             </select>
+            <p id="hardwareStatus" class="hardware-status checking">Đang kiểm tra FPGA UART…</p>
 
             <div id="walletSummary" class="wallet-summary empty">
               <span>Địa chỉ</span>

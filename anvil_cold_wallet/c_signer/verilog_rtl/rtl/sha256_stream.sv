@@ -36,6 +36,7 @@ module sha256_stream (
   logic [7:0] block_read_data,block_write_data;
   logic block_write_enable;
   logic [5:0] schedule_read_address,schedule_write_address;
+  logic [6:0] schedule_read_index;
   logic [31:0] schedule_read_data,schedule_write_data;
   logic schedule_write_enable;
 
@@ -114,6 +115,7 @@ module sha256_stream (
   always_comb begin
     block_read_address=0;block_write_enable=0;block_write_address=0;block_write_data=0;
     schedule_read_address=0;schedule_write_enable=0;schedule_write_address=0;schedule_write_data=0;
+    schedule_read_index=0;
 
     if(state==S_ABSORB && in_valid) begin
       block_write_enable=1;block_write_address=byte_position;block_write_data=in_byte;
@@ -139,11 +141,12 @@ module sha256_stream (
       block_read_address={round_index[3:0],byte_subindex};
     if(state==S_SCHED_REQ) begin
       case(schedule_subindex)
-        0:schedule_read_address=round_index-15;
-        1:schedule_read_address=round_index-2;
-        2:schedule_read_address=round_index-16;
-        default:schedule_read_address=round_index-7;
+        0:schedule_read_index=round_index-7'd15;
+        1:schedule_read_index=round_index-7'd2;
+        2:schedule_read_index=round_index-7'd16;
+        default:schedule_read_index=round_index-7'd7;
       endcase
+      schedule_read_address=schedule_read_index[5:0];
     end
 
     if(state==S_COMMIT) begin

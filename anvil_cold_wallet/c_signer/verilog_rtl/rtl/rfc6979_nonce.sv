@@ -4,6 +4,7 @@ module rfc6979_nonce (
   input  logic         clk,
   input  logic         reset_n,
   input  logic         start,
+  input  logic         retry,
   input  logic [255:0] private_key,
   input  logic [255:0] message_hash,
   output logic         busy,
@@ -79,6 +80,9 @@ module rfc6979_nonce (
             v_value <= 256'h0101010101010101010101010101010101010101010101010101010101010101;
             busy <= 1'b1;
             state <= RFC_CALL_K0;
+          end else if (retry) begin
+            busy <= 1'b1;
+            state <= RFC_CALL_RETRY_K;
           end
         end
 

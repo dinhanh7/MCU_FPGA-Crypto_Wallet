@@ -17,7 +17,7 @@ module tb_hmac_rfc6979;
     .clk(clk),.reset_n(reset_n),.start(h_start),.key(h_key),
     .message(h_message),.message_length(h_length),.busy(),.done(h_done),.digest(h_digest));
   rfc6979_nonce rfc (
-    .clk(clk),.reset_n(reset_n),.start(r_start),.private_key(`ETH_PRIVATE_KEY),
+    .clk(clk),.reset_n(reset_n),.start(r_start),.retry(1'b0),.private_key(`ETH_PRIVATE_KEY),
     .message_hash(256'hb11a13b969e57b09787936eaac76c01e8989b68a17b2c18a93554c89d76912f7),
     .busy(),.done(r_done),.nonce(r_nonce));
 

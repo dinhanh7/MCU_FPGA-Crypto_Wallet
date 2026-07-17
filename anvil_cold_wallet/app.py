@@ -7,6 +7,7 @@ import argparse
 import os
 import re
 import secrets
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from eth_utils import to_checksum_address
 from flask import Flask, Response, jsonify, render_template, request
 from web3.exceptions import Web3Exception
 
+from fpga_uart import FpgaUartError, FpgaUartSigner
+from fpga_wallet import sign_payload_fpga
 from wallet import (
     DEFAULT_RPC_URL,
     WalletError,
@@ -31,6 +34,11 @@ from wallet import (
 
 PROJECT_DIR = Path(__file__).resolve().parent
 WALLET_NAME = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
+FPGA_SIGNER_NAME = "__fpga_signer__"
+FPGA_ADDRESS_CHALLENGE = bytes.fromhex(
+    "4f0cc815c8e4f9c9854ce1dd70a47d8f"
+    "189509f1ec5664b8f30f57d16ee2be77"
+)
 
 
 def create_app(wallet_dir: Path | None = None) -> Flask:
@@ -43,6 +51,10 @@ def create_app(wallet_dir: Path | None = None) -> Flask:
             "C_SIGNER_BIN", str(PROJECT_DIR / "c_signer" / "build" / "eth_signer")
         )
     ).resolve()
+    app.config["FPGA_UART_PORT"] = os.environ.get("FPGA_UART_PORT", "/dev/ttyACM0")
+    app.config["FPGA_UART_TIMEOUT"] = float(os.environ.get("FPGA_UART_TIMEOUT", "3"))
+    app.config["FPGA_UART_LOCK"] = threading.Lock()
+    app.config["FPGA_SIGNER_ADDRESS"] = None
     app.config["WALLET_DIR"].mkdir(parents=True, exist_ok=True)
 
     @app.before_request
@@ -82,6 +94,7 @@ def create_app(wallet_dir: Path | None = None) -> Flask:
         return response
 
     @app.errorhandler(WalletError)
+    @app.errorhandler(FpgaUartError)
     @app.errorhandler(ValueError)
     @app.errorhandler(KeyError)
     @app.errorhandler(Web3Exception)
@@ -122,6 +135,28 @@ def create_app(wallet_dir: Path | None = None) -> Flask:
             name="C offline signer",
             address=c_signer_address(signer),
             path=str(signer),
+        )
+
+    @app.get("/api/fpga-signer")
+    def api_fpga_signer():
+        port = app.config["FPGA_UART_PORT"]
+        try:
+            address = probe_fpga_signer(app)
+        except (FpgaUartError, OSError, ValueError) as exc:
+            app.config["FPGA_SIGNER_ADDRESS"] = None
+            return success(
+                available=False,
+                name="Gowin ACG525 FPGA",
+                port=port,
+                baudRate=115200,
+                error=str(exc),
+            )
+        return success(
+            available=True,
+            name="Gowin ACG525 FPGA",
+            address=address,
+            port=port,
+            baudRate=115200,
         )
 
     @app.post("/api/wallets/create")
@@ -195,6 +230,20 @@ def create_app(wallet_dir: Path | None = None) -> Flask:
         )
         return success(signed=signed)
 
+    @app.post("/api/sign-fpga")
+    def api_sign_fpga():
+        body = json_body()
+        unsigned = body.get("unsigned")
+        if not isinstance(unsigned, dict):
+            raise WalletError("Thiếu unsigned transaction")
+        try:
+            signed = sign_with_fpga(app, unsigned)
+        except (FpgaUartError, OSError) as exc:
+            raise WalletError(
+                f"Không giao tiếp được FPGA tại {app.config['FPGA_UART_PORT']}: {exc}"
+            ) from exc
+        return success(signed=signed)
+
     @app.post("/api/broadcast")
     def api_broadcast():
         body = json_body()
@@ -250,10 +299,62 @@ def resolve_address(app: Flask, body: dict[str, Any]) -> str:
     if isinstance(wallet, str) and wallet.strip():
         if wallet.strip() == "__c_signer__":
             return c_signer_address(app.config["C_SIGNER_BIN"])
+        if wallet.strip() == FPGA_SIGNER_NAME:
+            return cached_fpga_signer_address(app)
         return keystore_address(wallet_path(app, wallet.strip(), must_exist=True))
     if isinstance(address, str) and address.strip():
         return to_checksum_address(address.strip())
     raise WalletError("Cần chọn ví hoặc nhập địa chỉ")
+
+
+def recover_fpga_signer_address(signature: dict[str, int]) -> str:
+    recovered = Account._recover_hash(
+        FPGA_ADDRESS_CHALLENGE,
+        vrs=(
+            int(signature["yParity"]),
+            int(signature["r"]),
+            int(signature["s"]),
+        ),
+    )
+    return to_checksum_address(recovered)
+
+
+def probe_fpga_signer(app: Flask) -> str:
+    with app.config["FPGA_UART_LOCK"]:
+        with FpgaUartSigner(
+            app.config["FPGA_UART_PORT"],
+            timeout=app.config["FPGA_UART_TIMEOUT"],
+        ) as signer:
+            signer.ping()
+            address = recover_fpga_signer_address(
+                signer.sign_hash(FPGA_ADDRESS_CHALLENGE)
+            )
+    app.config["FPGA_SIGNER_ADDRESS"] = address
+    return address
+
+
+def cached_fpga_signer_address(app: Flask) -> str:
+    address = app.config.get("FPGA_SIGNER_ADDRESS")
+    if isinstance(address, str) and address:
+        return address
+    try:
+        return probe_fpga_signer(app)
+    except (FpgaUartError, OSError, ValueError) as exc:
+        raise WalletError(
+            f"Không giao tiếp được FPGA tại {app.config['FPGA_UART_PORT']}: {exc}"
+        ) from exc
+
+
+def sign_with_fpga(app: Flask, unsigned: dict[str, Any]) -> dict[str, Any]:
+    with app.config["FPGA_UART_LOCK"]:
+        with FpgaUartSigner(
+            app.config["FPGA_UART_PORT"],
+            timeout=app.config["FPGA_UART_TIMEOUT"],
+        ) as signer:
+            signer.ping()
+            signed = sign_payload_fpga(unsigned, signer)
+    app.config["FPGA_SIGNER_ADDRESS"] = signed["from"]
+    return signed
 
 
 def transaction_balances(web3, signed: dict[str, Any]) -> dict[str, Any]:

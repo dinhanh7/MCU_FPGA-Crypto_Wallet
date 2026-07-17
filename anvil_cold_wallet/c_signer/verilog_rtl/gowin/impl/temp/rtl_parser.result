@@ -1,0 +1,150 @@
+[
+    {
+        "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv",
+        "InstLine": 4,
+        "InstName": "acg525_uart_top",
+        "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv",
+        "ModuleLine": 4,
+        "ModuleName": "acg525_uart_top",
+        "SubInsts": [
+            {
+                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv",
+                "InstLine": 23,
+                "InstName": "bridge",
+                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_hash_signer_bridge.sv",
+                "ModuleLine": 3,
+                "ModuleName": "uart_hash_signer_bridge",
+                "SubInsts": [
+                    {
+                        "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_hash_signer_bridge.sv",
+                        "InstLine": 74,
+                        "InstName": "receiver",
+                        "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_rx_8n1.sv",
+                        "ModuleLine": 3,
+                        "ModuleName": "uart_rx_8n1"
+                    },
+                    {
+                        "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_hash_signer_bridge.sv",
+                        "InstLine": 79,
+                        "InstName": "transmitter",
+                        "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_tx_8n1.sv",
+                        "ModuleLine": 3,
+                        "ModuleName": "uart_tx_8n1"
+                    },
+                    {
+                        "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_hash_signer_bridge.sv",
+                        "InstLine": 84,
+                        "InstName": "signer",
+                        "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv",
+                        "ModuleLine": 3,
+                        "ModuleName": "eth_hash_signer_core",
+                        "SubInsts": [
+                            {
+                                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv",
+                                "InstLine": 71,
+                                "InstName": "nonce_inst",
+                                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_nonce.sv",
+                                "ModuleLine": 3,
+                                "ModuleName": "rfc6979_nonce",
+                                "SubInsts": [
+                                    {
+                                        "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_nonce.sv",
+                                        "InstLine": 38,
+                                        "InstName": "hmac_inst",
+                                        "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_hmac_sha256.sv",
+                                        "ModuleLine": 7,
+                                        "ModuleName": "rfc6979_hmac_sha256",
+                                        "SubInsts": [
+                                            {
+                                                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_hmac_sha256.sv",
+                                                "InstLine": 34,
+                                                "InstName": "sha_inst",
+                                                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/sha256_stream.sv",
+                                                "ModuleLine": 5,
+                                                "ModuleName": "sha256_stream"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv",
+                                "InstLine": 77,
+                                "InstName": "point_inst",
+                                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+                                "ModuleLine": 5,
+                                "ModuleName": "secp256k1_point_mul_controller"
+                            },
+                            {
+                                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv",
+                                "InstLine": 109,
+                                "InstName": "shared_multiplier",
+                                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modmul256_controller.sv",
+                                "ModuleLine": 5,
+                                "ModuleName": "modmul256_controller"
+                            },
+                            {
+                                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv",
+                                "InstLine": 137,
+                                "InstName": "shared_modular_adder",
+                                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modaddsub256_seq.sv",
+                                "ModuleLine": 8,
+                                "ModuleName": "modaddsub256_seq"
+                            },
+                            {
+                                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv",
+                                "InstLine": 148,
+                                "InstName": "shared_inverse",
+                                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modinv256_controller.sv",
+                                "ModuleLine": 7,
+                                "ModuleName": "modinv256_controller"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+        "InstLine": 323,
+        "InstName": "secp256k1_point_mul",
+        "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+        "ModuleLine": 323,
+        "ModuleName": "secp256k1_point_mul",
+        "SubInsts": [
+            {
+                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+                "InstLine": 355,
+                "InstName": "shared_adder",
+                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modaddsub256_seq.sv",
+                "ModuleLine": 8,
+                "ModuleName": "modaddsub256_seq"
+            },
+            {
+                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+                "InstLine": 362,
+                "InstName": "shared_multiplier",
+                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modmul256_controller.sv",
+                "ModuleLine": 5,
+                "ModuleName": "modmul256_controller"
+            },
+            {
+                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+                "InstLine": 371,
+                "InstName": "shared_inverse",
+                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modinv256_controller.sv",
+                "ModuleLine": 7,
+                "ModuleName": "modinv256_controller"
+            },
+            {
+                "InstFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+                "InstLine": 379,
+                "InstName": "controller",
+                "ModuleFile": "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv",
+                "ModuleLine": 5,
+                "ModuleName": "secp256k1_point_mul_controller"
+            }
+        ]
+    }
+]

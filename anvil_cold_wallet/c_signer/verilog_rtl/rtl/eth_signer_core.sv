@@ -42,7 +42,7 @@ module eth_signer_core #(
     TOP_PUBLIC_POINT_START, TOP_PUBLIC_POINT_WAIT,
     TOP_ADDRESS_HASH_START, TOP_ADDRESS_HASH_FEED, TOP_ADDRESS_HASH_WAIT,
     TOP_UNSIGNED_HASH_START, TOP_UNSIGNED_ENCODER_START, TOP_UNSIGNED_WAIT,
-    TOP_NONCE_START, TOP_NONCE_WAIT,
+    TOP_NONCE_START, TOP_NONCE_WAIT, TOP_NONCE_RETRY,
     TOP_NONCE_POINT_START, TOP_NONCE_POINT_WAIT,
     TOP_RKEY_MUL_START, TOP_RKEY_MUL_WAIT,
     TOP_NONCE_INV_START, TOP_NONCE_INV_WAIT,
@@ -117,10 +117,10 @@ module eth_signer_core #(
     .inv_done(arithmetic_inv_done),.inv_result(arithmetic_inv_result)
   );
 
-  logic nonce_start, nonce_done;
+  logic nonce_start, nonce_retry, nonce_done;
   logic [255:0] deterministic_nonce;
   rfc6979_nonce nonce_inst (
-    .clk(clk),.reset_n(reset_n),.start(nonce_start),
+    .clk(clk),.reset_n(reset_n),.start(nonce_start),.retry(nonce_retry),
     .private_key(PRIVATE_KEY),.message_hash(message_hash),
     .busy(),.done(nonce_done),.nonce(deterministic_nonce)
   );
@@ -209,6 +209,7 @@ module eth_signer_core #(
   logic [255:0] public_x_reg, public_y_reg;
   logic [255:0] nonce_inverse_reg;
   logic [255:0] signature_numerator;
+  logic recovery_high_reg;
   logic raw_capture_active;
   logic [12:0] raw_write_index;
 
@@ -244,6 +245,7 @@ module eth_signer_core #(
     point_scalar=(state==TOP_PUBLIC_POINT_START||state==TOP_PUBLIC_POINT_WAIT) ?
                  PRIVATE_KEY : deterministic_nonce;
     nonce_start=(state==TOP_NONCE_START);
+    nonce_retry=(state==TOP_NONCE_RETRY);
 
     arithmetic_mul_start=(state==TOP_RKEY_MUL_START)||(state==TOP_S_MUL_START);
     arithmetic_mul_a=signature_r;
@@ -280,6 +282,7 @@ module eth_signer_core #(
       raw_transaction_length<=0;
       public_byte_index<=0;public_x_reg<=0;public_y_reg<=0;
       nonce_inverse_reg<=0;signature_numerator<=0;
+      recovery_high_reg<=0;
       raw_capture_active<=0;raw_write_index<=0;
     end else begin
       done<=1'b0;
@@ -322,14 +325,16 @@ module eth_signer_core #(
         end
 
         TOP_NONCE_START: state<=TOP_NONCE_WAIT;
+        TOP_NONCE_RETRY: state<=TOP_NONCE_WAIT;
         TOP_NONCE_WAIT: if(nonce_done) state<=TOP_NONCE_POINT_START;
         TOP_NONCE_POINT_START: state<=TOP_NONCE_POINT_WAIT;
         TOP_NONCE_POINT_WAIT: if(point_done) begin
-          if(point_x>=CURVE_N) begin
-            error<=1;error_code<=3;busy<=0;done<=1;state<=TOP_IDLE;
+          if(point_x==0 || point_x==CURVE_N) begin
+            state<=TOP_NONCE_RETRY;
           end else begin
-            signature_r<=point_x;
+            signature_r<=(point_x>CURVE_N)?point_x-CURVE_N:point_x;
             y_parity<=point_y[0];
+            recovery_high_reg<=(point_x>CURVE_N);
             state<=TOP_RKEY_MUL_START;
           end
         end
@@ -348,7 +353,9 @@ module eth_signer_core #(
         TOP_S_MUL_START: state<=TOP_S_MUL_WAIT;
         TOP_S_MUL_WAIT: if(arithmetic_mul_done) begin
           if(arithmetic_mul_result==0 || signature_r==0) begin
-            error<=1;error_code<=4;busy<=0;done<=1;state<=TOP_IDLE;
+            state<=TOP_NONCE_RETRY;
+          end else if(recovery_high_reg) begin
+            error<=1;error_code<=3;busy<=0;done<=1;state<=TOP_IDLE;
           end else begin
             if(arithmetic_mul_result>SECP256K1_N_HALF) begin
               signature_s<=CURVE_N-arithmetic_mul_result;

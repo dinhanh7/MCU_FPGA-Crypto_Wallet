@@ -1,0 +1,57 @@
+GowinSynthesis start
+Running parser ...
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv'
+Analyzing included file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/../rtl/private_key_rtl.svh'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv":2)
+Back to file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv":2)
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modaddsub256_seq.sv'
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modmul256_controller.sv'
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modinv256_controller.sv'
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv'
+Analyzing included file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_secp256k1_common.svh'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv":34)
+Back to file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv":34)
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/sha256_stream.sv'
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_hmac_sha256.sv'
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_nonce.sv'
+Analyzing included file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_secp256k1_common.svh'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_nonce.sv":14)
+Back to file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_nonce.sv'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_nonce.sv":14)
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv'
+Analyzing included file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_secp256k1_common.svh'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv":18)
+Back to file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv":18)
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_tx_8n1.sv'
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_rx_8n1.sv'
+Analyzing Verilog file '/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_hash_signer_bridge.sv'
+Compiling module 'acg525_uart_top'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/acg525_uart_top.sv":4)
+Compiling module 'uart_hash_signer_bridge(PRIVATE_KEY=256'hcf441a9aa8fa75a2822ab42be53155f6c99a95dfba39bb864348fdaea7f4ce88)'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_hash_signer_bridge.sv":3)
+Compiling module 'uart_rx_8n1'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_rx_8n1.sv":3)
+Compiling module 'uart_tx_8n1'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/uart_tx_8n1.sv":3)
+Compiling module 'eth_hash_signer_core(PRIVATE_KEY=256'b1100111101000100000110101001101010101000111110100111010110100010100000100010101010110100001010111110010100110001010101011111011011001001100110101001010111011111101110100011100110111011100001100100001101001000111111011010111010100111111101001100111010001000)'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/eth_hash_signer_core.sv":3)
+Compiling module 'rfc6979_nonce'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_nonce.sv":3)
+Compiling module 'rfc6979_hmac_sha256'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/rfc6979_hmac_sha256.sv":7)
+Compiling module 'sha256_stream'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/sha256_stream.sv":5)
+Extracting RAM for identifier 'block_memory'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/sha256_stream.sv":32)
+Extracting RAM for identifier 'schedule_memory'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/sha256_stream.sv":34)
+Compiling module 'secp256k1_point_mul_controller'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv":5)
+Extracting RAM for identifier 'register_file'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv":59)
+Compiling module 'modmul256_controller'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modmul256_controller.sv":5)
+Compiling module 'modaddsub256_seq'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modaddsub256_seq.sv":8)
+Compiling module 'modinv256_controller'("/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modinv256_controller.sv":7)
+NOTE  (EX0101) : Current top module is "acg525_uart_top"
+[5%] Running netlist conversion ...
+Running device independent optimization ...
+[10%] Optimizing Phase 0 completed
+[15%] Optimizing Phase 1 completed
+[25%] Optimizing Phase 2 completed
+Running inference ...
+[30%] Inferring Phase 0 completed
+[40%] Inferring Phase 1 completed
+[50%] Inferring Phase 2 completed
+[55%] Inferring Phase 3 completed
+Running technical mapping ...
+[60%] Tech-Mapping Phase 0 completed
+[65%] Tech-Mapping Phase 1 completed
+[75%] Tech-Mapping Phase 2 completed
+[80%] Tech-Mapping Phase 3 completed
+[90%] Tech-Mapping Phase 4 completed
+[95%] Generate netlist file "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/impl/gwsynthesis/eth_signer_acg525.vg" completed
+[100%] Generate report file "/media/abuntu/NVME_UBUNTU1/Working/MCU_FPGA/ETH/anvil_cold_wallet/c_signer/verilog_rtl/gowin/impl/gwsynthesis/eth_signer_acg525_syn.rpt.html" completed
+GowinSynthesis finish

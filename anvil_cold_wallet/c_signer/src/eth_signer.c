@@ -401,6 +401,101 @@ static void confirm_request(const TransactionOptions *options) {
     }
 }
 
+static void sign_recoverable_hash(
+    const secp256k1_context *context,
+    const secp256k1_pubkey *public_key,
+    const uint8_t private_key[32],
+    const uint8_t message_hash[32],
+    uint8_t compact_signature[64],
+    int *recovery_id
+) {
+    secp256k1_pubkey recovered_key;
+    secp256k1_ecdsa_recoverable_signature signature;
+    if (!secp256k1_ecdsa_sign_recoverable(
+            context, &signature, message_hash, private_key, NULL, NULL
+        )) {
+        fail("ECDSA signing failed");
+    }
+    if (!secp256k1_ecdsa_recoverable_signature_serialize_compact(
+            context, compact_signature, recovery_id, &signature
+        )) {
+        fail("could not serialize recoverable signature");
+    }
+    if (*recovery_id < 0 || *recovery_id > 1) {
+        fail("unexpected Ethereum recovery id");
+    }
+    if (!secp256k1_ecdsa_recover(context, &recovered_key, &signature, message_hash)
+        || memcmp(&recovered_key, public_key, sizeof(*public_key)) != 0) {
+        fail("internal public-key recovery verification failed");
+    }
+}
+
+static void sign_message_hash(const char *hash_text, bool yes) {
+    uint8_t private_key[32];
+    uint8_t signer_address[20];
+    uint8_t message_hash[32];
+    uint8_t compact_signature[64];
+    int recovery_id = 0;
+    secp256k1_pubkey public_key;
+
+    if (!parse_hex_exact(ETH_PRIVATE_KEY_HEX, private_key, sizeof(private_key))) {
+        fail("ETH_PRIVATE_KEY_HEX must contain exactly 32 bytes");
+    }
+    if (!parse_hex_exact(hash_text, message_hash, sizeof(message_hash))) {
+        fail("hash must contain exactly 32 hexadecimal bytes");
+    }
+    secp256k1_context *context = secp256k1_context_create(
+        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY
+    );
+    if (context == NULL) {
+        fail("could not create secp256k1 context");
+    }
+    randomize_context(context);
+    if (!secp256k1_ec_seckey_verify(context, private_key)) {
+        fail("compiled private key is not valid secp256k1 scalar");
+    }
+    derive_address(context, private_key, signer_address, &public_key);
+
+    if (!yes) {
+        fputs("\nOffline 32-byte hash signing request\nSigner:      ", stderr);
+        for (size_t index = 0U; index < sizeof(signer_address); ++index) {
+            fprintf(stderr, "%02x", signer_address[index]);
+        }
+        fputs("\nMessageHash: ", stderr);
+        for (size_t index = 0U; index < sizeof(message_hash); ++index) {
+            fprintf(stderr, "%02x", message_hash[index]);
+        }
+        fputs("\nType 'yes' to sign: ", stderr);
+        fflush(stderr);
+        char answer[16];
+        if (fgets(answer, sizeof(answer), stdin) == NULL || strcmp(answer, "yes\n") != 0) {
+            fail("signing cancelled");
+        }
+    }
+
+    sign_recoverable_hash(
+        context,
+        &public_key,
+        private_key,
+        message_hash,
+        compact_signature,
+        &recovery_id
+    );
+
+    fputs("{\n  \"format\": \"ethereum-hash-signer-v1\",\n  \"messageHash\": \"", stdout);
+    print_hex(message_hash, sizeof(message_hash));
+    fprintf(stdout, "\",\n  \"yParity\": %d,\n  \"r\": \"", recovery_id);
+    print_hex(compact_signature, 32U);
+    fputs("\",\n  \"s\": \"", stdout);
+    print_hex(compact_signature + 32U, 32U);
+    fputs("\"\n}\n", stdout);
+
+    secure_zero(private_key, sizeof(private_key));
+    secure_zero(message_hash, sizeof(message_hash));
+    secure_zero(compact_signature, sizeof(compact_signature));
+    secp256k1_context_destroy(context);
+}
+
 static void sign_transaction(const TransactionOptions *options) {
     uint8_t private_key[32];
     uint8_t signer_address[20];
@@ -409,8 +504,6 @@ static void sign_transaction(const TransactionOptions *options) {
     uint8_t compact_signature[64];
     int recovery_id = 0;
     secp256k1_pubkey public_key;
-    secp256k1_pubkey recovered_key;
-    secp256k1_ecdsa_recoverable_signature signature;
 
     if (!parse_hex_exact(ETH_PRIVATE_KEY_HEX, private_key, sizeof(private_key))) {
         fail("ETH_PRIVATE_KEY_HEX must contain exactly 32 bytes");
@@ -434,23 +527,14 @@ static void sign_transaction(const TransactionOptions *options) {
     Buffer unsigned_transaction = typed_transaction(&unsigned_payload);
     keccak256(unsigned_transaction.data, unsigned_transaction.length, signing_hash);
 
-    if (!secp256k1_ecdsa_sign_recoverable(
-            context, &signature, signing_hash, private_key, NULL, NULL
-        )) {
-        fail("ECDSA signing failed");
-    }
-    if (!secp256k1_ecdsa_recoverable_signature_serialize_compact(
-            context, compact_signature, &recovery_id, &signature
-        )) {
-        fail("could not serialize recoverable signature");
-    }
-    if (recovery_id < 0 || recovery_id > 1) {
-        fail("unexpected Ethereum recovery id");
-    }
-    if (!secp256k1_ecdsa_recover(context, &recovered_key, &signature, signing_hash)
-        || memcmp(&recovered_key, &public_key, sizeof(public_key)) != 0) {
-        fail("internal public-key recovery verification failed");
-    }
+    sign_recoverable_hash(
+        context,
+        &public_key,
+        private_key,
+        signing_hash,
+        compact_signature,
+        &recovery_id
+    );
 
     Buffer signed_payload = {{0U}, 0U};
     append_common_fields(&signed_payload, options);
@@ -508,9 +592,11 @@ static void usage(const char *program) {
         stderr,
         "Usage:\n"
         "  %s address\n"
-        "  %s sign --chain-id N --nonce N --max-priority-fee-per-gas N \\\n+\n"
-        "      --max-fee-per-gas N --gas-limit N --to 0xADDRESS --value WEI \\\n+\n"
+        "  %s sign-hash --hash 0x32_BYTE_HASH [--yes]\n"
+        "  %s sign --chain-id N --nonce N --max-priority-fee-per-gas N \\\n+"
+        "      --max-fee-per-gas N --gas-limit N --to 0xADDRESS --value WEI \\\n+"
         "      [--data 0x] [--yes]\n",
+        program,
         program,
         program
     );
@@ -527,6 +613,26 @@ static const char *required_value(int argc, char **argv, int *index) {
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "address") == 0) {
         print_address();
+        return EXIT_SUCCESS;
+    }
+    if (argc >= 2 && strcmp(argv[1], "sign-hash") == 0) {
+        const char *hash_text = NULL;
+        bool yes = false;
+        for (int index = 2; index < argc; ++index) {
+            if (strcmp(argv[index], "--hash") == 0) {
+                hash_text = required_value(argc, argv, &index);
+            } else if (strcmp(argv[index], "--yes") == 0) {
+                yes = true;
+            } else {
+                usage(argv[0]);
+                fail("unknown sign-hash option");
+            }
+        }
+        if (hash_text == NULL) {
+            usage(argv[0]);
+            fail("missing --hash option");
+        }
+        sign_message_hash(hash_text, yes);
         return EXIT_SUCCESS;
     }
     if (argc < 2 || strcmp(argv[1], "sign") != 0) {

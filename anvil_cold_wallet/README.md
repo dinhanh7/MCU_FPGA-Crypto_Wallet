@@ -79,6 +79,23 @@ phần cứng, rồi chuyển raw signed transaction về máy online để broa
 
 Chi tiết build và giao thức C nằm tại `c_signer/README.md`.
 
+### Dùng Gowin ACG525 FPGA signer trên web
+
+Nạp bitstream UART, nối USB-UART 3.3 V và kiểm tra cổng serial xuất hiện. Mặc định
+web dùng `/dev/ttyACM0`, có thể đổi bằng biến môi trường:
+
+```bash
+export FPGA_UART_PORT=/dev/ttyACM0
+export FPGA_UART_TIMEOUT=3
+python app.py
+```
+
+Khi mở trang, backend gửi `PING` và ký một challenge cố định để recover địa chỉ
+Ethereum của private key đang nằm trong FPGA. Nếu thành công, dropdown signer sẽ có
+thêm mục `Gowin ACG525 FPGA`. Chọn mục này để build giao dịch từ đúng địa chỉ FPGA,
+sau đó bấm `Ký bằng FPGA qua UART`. MCU/Python chỉ tạo EIP-1559 signing hash; FPGA
+trả `yParity`, `r`, `s`, và backend tự recover kiểm tra trước khi cho broadcast.
+
 ## Tạo ví mới
 
 ```bash

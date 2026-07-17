@@ -5,6 +5,9 @@ Ethereum EIP-1559 Type 2, thực hiện Keccak-256, RLP và ký recoverable ECDS
 đường cong secp256k1. Output là JSON chứa `r`, `s`, `yParity`, raw transaction và
 transaction hash.
 
+Nó cũng có chế độ ký trực tiếp một hash 32 byte để dùng làm phần mềm tham chiếu
+cho kiến trúc MCU tạo RLP/Keccak và FPGA chỉ thực hiện ECDSA.
+
 ## Build
 
 ```bash
@@ -54,6 +57,29 @@ Sau khi đổi key phải build lại. Xem địa chỉ signer:
 Không truyền `--yes` trên thiết bị offline thật: signer sẽ in toàn bộ nội dung và
 yêu cầu nhập `yes`. `--yes` chỉ dành cho automated integration test.
 
+## Ký hash 32 byte
+
+```bash
+./build/eth_signer sign-hash \
+  --hash 0xb11a13b969e57b09787936eaac76c01e8989b68a17b2c18a93554c89d76912f7 \
+  --yes
+```
+
+Output JSON có đúng giao diện logic tương ứng với FPGA:
+
+```json
+{
+  "format": "ethereum-hash-signer-v1",
+  "messageHash": "0x...",
+  "yParity": 0,
+  "r": "0x...",
+  "s": "0x..."
+}
+```
+
+`messageHash`, `r` và `s` đều là 32 byte big-endian. Có thể chạy đối chiếu trực
+tiếp C và RTL bằng `make compare-c-rtl` trong `verilog_rtl/`.
+
 ## Giới hạn và hướng STM32
 
 - Phiên bản này dùng Linux CLI và `/dev/urandom` để randomize context.
@@ -70,6 +96,7 @@ dành cho QuestaSim, chưa phải RTL có thể tổng hợp lên FPGA.
 
 ## Bản RTL tổng hợp cho FPGA Gowin ACG525
 
-Bản SystemVerilog tuần tự có thể tổng hợp, full test so sánh với signer C và
-project Gowin cho `GW5A-LV25UG324C2/I1` nằm trong
-[`verilog_rtl/`](verilog_rtl/README.md).
+Bản SystemVerilog tuần tự trong [`verilog_rtl/`](verilog_rtl/README.md) đã được
+thu gọn để ACG525 chỉ nhận `messageHash` và trả `yParity/r/s`. RLP EIP-1559 và
+Keccak-256 được chuyển hoàn toàn sang MCU; project Gowin không còn chứa hai khối
+này.
