@@ -1,0 +1,6 @@
+wallets/
+*.tmp
+unsigned_transaction.json
+signed_transaction.json
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Anvil Cold Wallet</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body data-default-rpc="{{ default_rpc_url }}">
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand-mark" aria-hidden="true">A</div>
+        <div>
+          <p class="eyebrow">LOCAL SIGNER</p>
+          <h1>Anvil Cold Wallet</h1>
+        </div>
+        <div id="networkBadge" class="network-badge offline">
+          <span class="status-dot"></span>
+          <span id="networkBadgeText">Chưa kết nối</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div>
+            <p class="eyebrow">SIGN LOCALLY · BROADCAST GLOBALLY</p>
+            <h2>Kiểm soát private key.<br>Không gửi nó lên blockchain.</h2>
+            <p class="hero-copy">
+              Tạo giao dịch trên Anvil, kiểm tra từng trường, ký từ keystore mã hóa
+              và chỉ broadcast raw transaction đã ký.
+            </p>
+          </div>
+          <div class="security-callout">
+            <span class="shield">◆</span>
+            <div>
+              <strong>Localhost only</strong>
+              <p>Web server chỉ lắng nghe tại 127.0.0.1. Password không được lưu trong trình duyệt.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="card network-card">
+          <div class="section-heading">
+            <div>
+              <p class="step-label">NETWORK</p>
+              <h3>Kết nối Anvil</h3>
+            </div>
+            <button id="connectButton" class="button secondary" type="button">Kiểm tra RPC</button>
+          </div>
+          <label for="rpcUrl">JSON-RPC URL</label>
+          <div class="input-row">
+            <input id="rpcUrl" type="url" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="network-stats">
+            <div><span>Chain ID</span><strong id="chainId">—</strong></div>
+            <div><span>Block</span><strong id="blockNumber">—</strong></div>
+            <div><span>Client</span><strong id="clientVersion">—</strong></div>
+          </div>
+        </section>
+
+        <div class="two-column">
+          <section class="card">
+            <div class="section-heading">
+              <div>
+                <p class="step-label">01 · KEYSTORE</p>
+                <h3>Quản lý ví</h3>
+              </div>
+              <button id="refreshWalletsButton" class="icon-button" type="button" title="Tải lại">↻</button>
+            </div>
+
+            <label for="walletSelect">Ví đang chọn</label>
+            <select id="walletSelect">
+              <option value="">Chưa có ví</option>
+            </select>
+
+            <div id="walletSummary" class="wallet-summary empty">
+              <span>Địa chỉ</span>
+              <code id="walletAddress">Chưa chọn ví</code>
+              <div class="balance-line">
+                <strong id="walletBalance">— ETH</strong>
+                <button id="balanceButton" class="text-button" type="button">Cập nhật</button>
+              </div>
+              <small id="balanceMeta">Chọn ví để tự động cập nhật số dư</small>
+            </div>
+
+            <details class="wallet-action">
+              <summary>Tạo ví ngẫu nhiên mới</summary>
+              <div class="details-body">
+                <label for="createName">Tên ví</label>
+                <input id="createName" placeholder="alice" autocomplete="off">
+                <label for="createPassword">Mật khẩu keystore</label>
+                <input id="createPassword" type="password" autocomplete="new-password">
+                <label for="createPasswordConfirm">Nhập lại mật khẩu</label>
+                <input id="createPasswordConfirm" type="password" autocomplete="new-password">
+                <button id="createWalletButton" class="button primary full" type="button">Tạo encrypted keystore</button>
+              </div>
+            </details>
+
+            <details class="wallet-action">
+              <summary>Import private key test</summary>
+              <div class="details-body">
+                <label for="importName">Tên ví</label>
+                <input id="importName" placeholder="anvil-account" autocomplete="off">
+                <label for="privateKey">Private key</label>
+                <input id="privateKey" type="password" placeholder="0x..." autocomplete="off">
+                <label for="importPassword">Mật khẩu keystore</label>
+                <input id="importPassword" type="password" autocomplete="new-password">
+                <button id="importWalletButton" class="button secondary full" type="button">Mã hóa và import</button>
+              </div>
+            </details>
+          </section>
+
+          <section class="card transfer-card">
+            <div class="section-heading">
+              <div>
+                <p class="step-label">02 · TRANSACTION</p>
+                <h3>Chuyển ETH</h3>
+              </div>
+              <span class="mode-chip">EIP-1559</span>
+            </div>
+
+            <label for="recipient">Địa chỉ nhận</label>
+            <input id="recipient" placeholder="0x..." autocomplete="off" spellcheck="false">
+
+            <label for="amount">Số lượng</label>
+            <div class="amount-input">
+              <input id="amount" inputmode="decimal" placeholder="0.1" autocomplete="off">
+              <span>ETH</span>
+            </div>
+
+            <button id="buildButton" class="button primary full" type="button">1. Build unsigned transaction</button>
+
+            <div id="transactionPreview" class="transaction-preview empty">
+              <p>Chưa có giao dịch</p>
+            </div>
+
+            <div class="file-actions">
+              <button id="downloadUnsignedButton" class="button ghost" type="button" disabled>Tải unsigned JSON</button>
+              <label class="button ghost file-label">
+                Mở unsigned JSON
+                <input id="unsignedFile" type="file" accept="application/json,.json">
+              </label>
+            </div>
+
+            <p id="signerMode" class="signer-mode">Chọn signer để ký giao dịch</p>
+            <div id="passwordSigningFields">
+              <label for="signPassword">Mật khẩu để ký</label>
+              <input id="signPassword" type="password" autocomplete="current-password">
+            </div>
+            <button id="signButton" class="button warning full" type="button" disabled>2. Kiểm tra và ký offline</button>
+
+            <div class="file-actions">
+              <button id="downloadSignedButton" class="button ghost" type="button" disabled>Tải signed JSON</button>
+              <label class="button ghost file-label">
+                Mở signed JSON
+                <input id="signedFile" type="file" accept="application/json,.json">
+              </label>
+            </div>
+
+            <button id="broadcastButton" class="button success full" type="button" disabled>3. Broadcast lên Anvil</button>
+          </section>
+        </div>
+
+        <section class="card activity-card">
+          <div class="section-heading">
+            <div>
+              <p class="step-label">ACTIVITY</p>
+              <h3>Kết quả gần nhất</h3>
+            </div>
+            <button id="clearActivityButton" class="text-button" type="button">Xóa</button>
+          </div>
+          <pre id="activityLog">Sẵn sàng.</pre>
+        </section>
+      </main>
+
+      <footer>
+        <p>Prototype chỉ dành cho Anvil testnet. Không dùng private key hoặc tài sản Mainnet.</p>
+      </footer>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>

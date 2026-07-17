@@ -1,0 +1,6 @@
+build/
+vendor/
+include/private_key.h
+verilog_sim/rtl/private_key_sim.svh
+verilog_rtl/rtl/private_key_rtl.svh
+verilog_sim/tests/__pycache__/
