@@ -6,10 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <secp256k1.h>
-#include <secp256k1_recovery.h>
-
-#include "private_key.h"
+#ifndef __linux__
+#include "hal_spi.h"
+// extern SPI_Handle_T hspi0; // Uncomment khi ghép vào project Sonix
+#endif
 
 #define BUFFER_CAPACITY 8192U
 #define MAX_DATA_BYTES 2048U
@@ -330,48 +330,6 @@ static Buffer typed_transaction(const Buffer *list_payload) {
     return typed;
 }
 
-static void derive_address(
-    const secp256k1_context *context,
-    const uint8_t private_key[32],
-    uint8_t address[20],
-    secp256k1_pubkey *public_key
-) {
-    uint8_t serialized[65];
-    size_t serialized_length = sizeof(serialized);
-    uint8_t hash[32];
-    if (!secp256k1_ec_pubkey_create(context, public_key, private_key)) {
-        fail("could not derive public key");
-    }
-    if (!secp256k1_ec_pubkey_serialize(
-            context,
-            serialized,
-            &serialized_length,
-            public_key,
-            SECP256K1_EC_UNCOMPRESSED
-        ) || serialized_length != 65U) {
-        fail("could not serialize public key");
-    }
-    keccak256(serialized + 1U, 64U, hash);
-    memcpy(address, hash + 12U, 20U);
-    secure_zero(serialized, sizeof(serialized));
-    secure_zero(hash, sizeof(hash));
-}
-
-static void randomize_context(secp256k1_context *context) {
-    uint8_t seed[32];
-    FILE *random = fopen("/dev/urandom", "rb");
-    if (random == NULL) {
-        fail("cannot open /dev/urandom for context blinding");
-    }
-    size_t received = fread(seed, 1U, sizeof(seed), random);
-    fclose(random);
-    if (received != sizeof(seed) || !secp256k1_context_randomize(context, seed)) {
-        secure_zero(seed, sizeof(seed));
-        fail("could not randomize secp256k1 context");
-    }
-    secure_zero(seed, sizeof(seed));
-}
-
 static void show_request(const TransactionOptions *options, const uint8_t address[20]) {
     fputs("\nOffline EIP-1559 signing request\n", stderr);
     fputs("Signer:      ", stderr);
@@ -401,124 +359,62 @@ static void confirm_request(const TransactionOptions *options) {
     }
 }
 
-static void sign_recoverable_hash(
-    const secp256k1_context *context,
-    const secp256k1_pubkey *public_key,
-    const uint8_t private_key[32],
-    const uint8_t message_hash[32],
-    uint8_t compact_signature[64],
-    int *recovery_id
-) {
-    secp256k1_pubkey recovered_key;
-    secp256k1_ecdsa_recoverable_signature signature;
-    if (!secp256k1_ecdsa_sign_recoverable(
-            context, &signature, message_hash, private_key, NULL, NULL
-        )) {
-        fail("ECDSA signing failed");
-    }
-    if (!secp256k1_ecdsa_recoverable_signature_serialize_compact(
-            context, compact_signature, recovery_id, &signature
-        )) {
-        fail("could not serialize recoverable signature");
-    }
-    if (*recovery_id < 0 || *recovery_id > 1) {
-        fail("unexpected Ethereum recovery id");
-    }
-    if (!secp256k1_ecdsa_recover(context, &recovered_key, &signature, message_hash)
-        || memcmp(&recovered_key, public_key, sizeof(*public_key)) != 0) {
-        fail("internal public-key recovery verification failed");
-    }
-}
-
-static void sign_message_hash(const char *hash_text, bool yes) {
-    uint8_t private_key[32];
-    uint8_t signer_address[20];
-    uint8_t message_hash[32];
-    uint8_t compact_signature[64];
-    int recovery_id = 0;
-    secp256k1_pubkey public_key;
-
-    if (!parse_hex_exact(ETH_PRIVATE_KEY_HEX, private_key, sizeof(private_key))) {
-        fail("ETH_PRIVATE_KEY_HEX must contain exactly 32 bytes");
-    }
-    if (!parse_hex_exact(hash_text, message_hash, sizeof(message_hash))) {
-        fail("hash must contain exactly 32 hexadecimal bytes");
-    }
-    secp256k1_context *context = secp256k1_context_create(
-        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY
-    );
-    if (context == NULL) {
-        fail("could not create secp256k1 context");
-    }
-    randomize_context(context);
-    if (!secp256k1_ec_seckey_verify(context, private_key)) {
-        fail("compiled private key is not valid secp256k1 scalar");
-    }
-    derive_address(context, private_key, signer_address, &public_key);
-
-    if (!yes) {
-        fputs("\nOffline 32-byte hash signing request\nSigner:      ", stderr);
-        for (size_t index = 0U; index < sizeof(signer_address); ++index) {
-            fprintf(stderr, "%02x", signer_address[index]);
-        }
-        fputs("\nMessageHash: ", stderr);
-        for (size_t index = 0U; index < sizeof(message_hash); ++index) {
-            fprintf(stderr, "%02x", message_hash[index]);
-        }
-        fputs("\nType 'yes' to sign: ", stderr);
-        fflush(stderr);
-        char answer[16];
-        if (fgets(answer, sizeof(answer), stdin) == NULL || strcmp(answer, "yes\n") != 0) {
-            fail("signing cancelled");
-        }
-    }
-
-    sign_recoverable_hash(
-        context,
-        &public_key,
-        private_key,
-        message_hash,
-        compact_signature,
-        &recovery_id
-    );
-
-    fputs("{\n  \"format\": \"ethereum-hash-signer-v1\",\n  \"messageHash\": \"", stdout);
-    print_hex(message_hash, sizeof(message_hash));
-    fprintf(stdout, "\",\n  \"yParity\": %d,\n  \"r\": \"", recovery_id);
-    print_hex(compact_signature, 32U);
-    fputs("\",\n  \"s\": \"", stdout);
-    print_hex(compact_signature + 32U, 32U);
-    fputs("\"\n}\n", stdout);
-
-    secure_zero(private_key, sizeof(private_key));
-    secure_zero(message_hash, sizeof(message_hash));
-    secure_zero(compact_signature, sizeof(compact_signature));
-    secp256k1_context_destroy(context);
+static void spi_fpga_sign(const uint8_t message_hash[32], const uint8_t pin[4], uint8_t signature_r[32], uint8_t signature_s[32], int *recovery_id) {
+#ifdef __linux__
+    fprintf(stderr, "[Mock SPI] Sending Command 0x01 (SIGN_REQ) to FPGA...\n");
+    fprintf(stderr, "[Mock SPI] Hash: 0x");
+    for (int i = 0; i < 32; i++) fprintf(stderr, "%02x", message_hash[i]);
+    fprintf(stderr, "\n[Mock SPI] PIN: %02x%02x%02x%02x\n", pin[0], pin[1], pin[2], pin[3]);
+    
+    fprintf(stderr, "[Mock SPI] Waiting for FPGA (AES + ECDSA)...\n");
+    fprintf(stderr, "[Mock SPI] Sending Command 0x02 (READ_SIG) to FPGA...\n");
+    
+    memset(signature_r, 0x11, 32); // Mock R
+    memset(signature_s, 0x22, 32); // Mock S
+    *recovery_id = 1;
+    fprintf(stderr, "[Mock SPI] Received Signature from FPGA!\n\n");
+#else
+    uint8_t cmd_sign[1] = {0x01};
+    uint8_t cmd_read[1] = {0x02};
+    uint8_t sig_buf[64];
+    
+    // 1. Kéo CS xuống mức thấp
+    // HAL_GPIO_WritePin(SPI_CS_PORT, SPI_CS_PIN, GPIO_PIN_RESET);
+    
+    // 2. Gửi Lệnh SIGN_REQ
+    HAL_SPI_Transmit(&hspi0, cmd_sign, 1, 1000);
+    // Gửi Hash
+    HAL_SPI_Transmit(&hspi0, (uint8_t*)message_hash, 32, 1000);
+    // Gửi PIN
+    HAL_SPI_Transmit(&hspi0, (uint8_t*)pin, 4, 1000);
+    
+    // 3. Kéo CS lên mức cao
+    // HAL_GPIO_WritePin(SPI_CS_PORT, SPI_CS_PIN, GPIO_PIN_SET);
+    
+    // 4. Đợi FPGA xử lý (Polling hoặc Interrupt)
+    // HAL_Delay(100); 
+    
+    // 5. Đọc chữ ký
+    // HAL_GPIO_WritePin(SPI_CS_PORT, SPI_CS_PIN, GPIO_PIN_RESET);
+    HAL_SPI_Transmit(&hspi0, cmd_read, 1, 1000);
+    HAL_SPI_Receive(&hspi0, sig_buf, 64, 1000);
+    // HAL_GPIO_WritePin(SPI_CS_PORT, SPI_CS_PIN, GPIO_PIN_SET);
+    
+    memcpy(signature_r, sig_buf, 32);
+    memcpy(signature_s, sig_buf + 32, 32);
+    *recovery_id = 0; // Cần FPGA trả về y_parity
+#endif
 }
 
 static void sign_transaction(const TransactionOptions *options) {
-    uint8_t private_key[32];
-    uint8_t signer_address[20];
+    uint8_t signer_address[20] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67}; // Mock Address
     uint8_t signing_hash[32];
     uint8_t transaction_hash[32];
-    uint8_t compact_signature[64];
+    uint8_t signature_r[32];
+    uint8_t signature_s[32];
     int recovery_id = 0;
-    secp256k1_pubkey public_key;
+    uint8_t dummy_pin[4] = {0x12, 0x34, 0x56, 0x78}; // Mã PIN người dùng nhập
 
-    if (!parse_hex_exact(ETH_PRIVATE_KEY_HEX, private_key, sizeof(private_key))) {
-        fail("ETH_PRIVATE_KEY_HEX must contain exactly 32 bytes");
-    }
-    secp256k1_context *context = secp256k1_context_create(
-        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY
-    );
-    if (context == NULL) {
-        fail("could not create secp256k1 context");
-    }
-    randomize_context(context);
-    if (!secp256k1_ec_seckey_verify(context, private_key)) {
-        fail("compiled private key is not valid secp256k1 scalar");
-    }
-    derive_address(context, private_key, signer_address, &public_key);
     show_request(options, signer_address);
     confirm_request(options);
 
@@ -527,14 +423,8 @@ static void sign_transaction(const TransactionOptions *options) {
     Buffer unsigned_transaction = typed_transaction(&unsigned_payload);
     keccak256(unsigned_transaction.data, unsigned_transaction.length, signing_hash);
 
-    sign_recoverable_hash(
-        context,
-        &public_key,
-        private_key,
-        signing_hash,
-        compact_signature,
-        &recovery_id
-    );
+    // Giao phó cho FPGA ký qua SPI
+    spi_fpga_sign(signing_hash, dummy_pin, signature_r, signature_s, &recovery_id);
 
     Buffer signed_payload = {{0U}, 0U};
     append_common_fields(&signed_payload, options);
@@ -542,8 +432,8 @@ static void sign_transaction(const TransactionOptions *options) {
     rlp_bytes(&signed_payload, &parity, parity == 0U ? 0U : 1U);
     const uint8_t *r_start = NULL;
     const uint8_t *s_start = NULL;
-    size_t r_length = minimal_integer(compact_signature, &r_start);
-    size_t s_length = minimal_integer(compact_signature + 32U, &s_start);
+    size_t r_length = minimal_integer(signature_r, &r_start);
+    size_t s_length = minimal_integer(signature_s, &s_start);
     rlp_bytes(&signed_payload, r_start, r_length);
     rlp_bytes(&signed_payload, s_start, s_length);
     Buffer raw_transaction = typed_transaction(&signed_payload);
@@ -554,37 +444,14 @@ static void sign_transaction(const TransactionOptions *options) {
     fputs("\",\n  \"messageHash\": \"", stdout);
     print_hex(signing_hash, sizeof(signing_hash));
     fprintf(stdout, "\",\n  \"yParity\": %d,\n  \"r\": \"", recovery_id);
-    print_hex(compact_signature, 32U);
+    print_hex(signature_r, 32U);
     fputs("\",\n  \"s\": \"", stdout);
-    print_hex(compact_signature + 32U, 32U);
+    print_hex(signature_s, 32U);
     fputs("\",\n  \"rawTransaction\": \"", stdout);
     print_hex(raw_transaction.data, raw_transaction.length);
     fputs("\",\n  \"transactionHash\": \"", stdout);
     print_hex(transaction_hash, sizeof(transaction_hash));
     fputs("\"\n}\n", stdout);
-
-    secure_zero(private_key, sizeof(private_key));
-    secure_zero(signing_hash, sizeof(signing_hash));
-    secure_zero(compact_signature, sizeof(compact_signature));
-    secp256k1_context_destroy(context);
-}
-
-static void print_address(void) {
-    uint8_t private_key[32];
-    uint8_t address[20];
-    secp256k1_pubkey public_key;
-    if (!parse_hex_exact(ETH_PRIVATE_KEY_HEX, private_key, sizeof(private_key))) {
-        fail("ETH_PRIVATE_KEY_HEX must contain exactly 32 bytes");
-    }
-    secp256k1_context *context = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
-    if (context == NULL || !secp256k1_ec_seckey_verify(context, private_key)) {
-        fail("compiled private key is invalid");
-    }
-    derive_address(context, private_key, address, &public_key);
-    print_hex(address, sizeof(address));
-    fputc('\n', stdout);
-    secure_zero(private_key, sizeof(private_key));
-    secp256k1_context_destroy(context);
 }
 
 static void usage(const char *program) {
@@ -611,30 +478,6 @@ static const char *required_value(int argc, char **argv, int *index) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 2 && strcmp(argv[1], "address") == 0) {
-        print_address();
-        return EXIT_SUCCESS;
-    }
-    if (argc >= 2 && strcmp(argv[1], "sign-hash") == 0) {
-        const char *hash_text = NULL;
-        bool yes = false;
-        for (int index = 2; index < argc; ++index) {
-            if (strcmp(argv[index], "--hash") == 0) {
-                hash_text = required_value(argc, argv, &index);
-            } else if (strcmp(argv[index], "--yes") == 0) {
-                yes = true;
-            } else {
-                usage(argv[0]);
-                fail("unknown sign-hash option");
-            }
-        }
-        if (hash_text == NULL) {
-            usage(argv[0]);
-            fail("missing --hash option");
-        }
-        sign_message_hash(hash_text, yes);
-        return EXIT_SUCCESS;
-    }
     if (argc < 2 || strcmp(argv[1], "sign") != 0) {
         usage(argv[0]);
         return EXIT_FAILURE;

@@ -5,19 +5,20 @@
     <Version>5</Version>
     <Device name="GW5A-25A" pn="GW5A-LV25UG324C2/I1">gw5a25a-008</Device>
     <FileList>
-        <File path="acg525_uart_top.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/private_key_rtl.svh" type="file.other" enable="1"/>
+        <File path="acg525_selftest_top.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/crypvault_fpga_top.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/eth_signer_core.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/spi_mcu_fpga_bridge.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/aes256_decrypt_core.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/trng_ring_oscillator.sv" type="file.verilog" enable="1"/>
         <File path="../rtl/modaddsub256_seq.sv" type="file.verilog" enable="1"/>
         <File path="../rtl/modmul256_controller.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/modmul256.sv" type="file.verilog" enable="1"/>
         <File path="../rtl/modinv256_controller.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/modinv256.sv" type="file.verilog" enable="1"/>
         <File path="../rtl/secp256k1_point_mul.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/sha256_stream.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/rfc6979_hmac_sha256.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/rfc6979_nonce.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/eth_hash_signer_core.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/uart_tx_8n1.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/uart_rx_8n1.sv" type="file.verilog" enable="1"/>
-        <File path="../rtl/uart_hash_signer_bridge.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/eth_secp256k1_pkg.sv" type="file.verilog" enable="1"/>
+        <File path="../rtl/eth_secp256k1_common.svh" type="file.other" enable="1"/>
         <File path="acg525.cst" type="file.cst" enable="1"/>
         <File path="acg525.sdc" type="file.sdc" enable="1"/>
     </FileList>
