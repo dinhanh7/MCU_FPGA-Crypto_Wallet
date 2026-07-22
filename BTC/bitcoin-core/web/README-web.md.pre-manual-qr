@@ -1,0 +1,71 @@
+# Web Bitcoin Regtest – giao tiếp MCU bằng QR
+
+Web dùng QR thích nghi: PSBT nhỏ là một QR tĩnh, PSBT lớn là BBQr động nhiều
+khung. Không tải PSBT bằng tệp trong flow chính và không có API ký.
+
+## Cách sử dụng
+
+### 1. Web → MCU
+
+1. Chọn ví MCU nguồn.
+2. Nhập địa chỉ nhận và số Bitcoin.
+3. Nhấn **Tạo QR PSBT**.
+4. Web tự chọn QR tĩnh hoặc BBQr động.
+5. Nếu là QR động, giữ camera MCU đến khi nhận đủ khung.
+
+### 2. Xác nhận trên MCU
+
+Trong mô phỏng:
+
+```bash
+cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+bin/coldsign mcu-sign-qr \
+  keys/cold.key \
+  keys/mcu.passkey \
+  transfer/signed-qr.html
+```
+
+Kiểm tra địa chỉ, số tiền, phí, tiền thừa và `freeze_id`; nhập passkey rồi nhập
+`DONG Y`. Mở `transfer/signed-qr.html` toàn màn hình để mô phỏng LCD MCU.
+
+### 3. MCU → Web
+
+1. Trên web nhấn **Bật camera quét QR đã ký**.
+2. Hướng webcam vào QR tĩnh hoặc động trên MCU/màn hình mô phỏng.
+3. Chờ tiến độ báo đã nhận đủ khung.
+4. Nhấn **Hoàn thiện → Phát**.
+5. Đào một block để xác nhận giao dịch Regtest.
+
+Trình duyệt tạo và đọc QR cục bộ bằng các thư viện đã lưu trong thư mục web;
+PSBT không được gửi tới dịch vụ tạo QR bên ngoài.
+
+## API
+
+```text
+GET  /api/status
+POST /api/wallet
+POST /api/address
+POST /api/mcu/register
+POST /api/psbt/create
+POST /api/psbt/broadcast
+POST /api/cold/mine
+```
+
+Không tồn tại endpoint gọi C-signer. `/api/psbt/create` chỉ trả QR của PSBT chưa
+ký; `/api/psbt/broadcast` chỉ nhận QR chứa PSBT đã có chữ ký hợp lệ để Bitcoin
+Core hoàn thiện và phát.
+
+## Thành phần QR
+
+```text
+qrcode.min.js  tạo QR BBQr trên web
+jsQR.js         quét QR từ webcam
+BBQr Z/P        Zlib + Base32, tối đa 100 byte cho toàn bộ mỗi khung
+```
+
+Webcam cần HTTPS hoặc localhost và người dùng phải cấp quyền camera. Đường
+TryCloudflare đáp ứng điều kiện HTTPS.
+
+Web hiện tạo giao dịch dùng một UTXO. Toàn bộ mỗi QR, gồm header BBQr 8 byte,
+không vượt 100 byte. Khung động dùng payload 88 ký tự nên dài 96 byte; khung
+cuối thường ngắn hơn. Giao diện hiển thị số byte thực tế của từng khung.

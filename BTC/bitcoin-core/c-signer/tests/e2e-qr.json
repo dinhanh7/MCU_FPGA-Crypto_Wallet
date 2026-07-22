@@ -1,0 +1,18 @@
+{
+  "transport": "BBQr H/P",
+  "unsigned_psbt_bytes": 355,
+  "unsigned_qr_frames": 3,
+  "out_of_order_receive": true,
+  "wrong_passkey_no_qr": true,
+  "cancel_no_qr": true,
+  "freeze_verified": true,
+  "signature_verified": true,
+  "signed_psbt_bytes": 463,
+  "signed_qr_frames": 4,
+  "mcu_qr_html_has_svg": true,
+  "bitcoin_core_complete": true,
+  "mempool_allowed": true,
+  "txid": "47e50da060c9ba9b3142b4ec4a8310f1e5867a1ea8c176d99eb74c93b8daad54",
+  "confirmations": 1,
+  "mempool_count": 0
+}

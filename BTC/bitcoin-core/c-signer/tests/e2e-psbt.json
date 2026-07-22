@@ -1,0 +1,15 @@
+{
+  "tested_at": "2026-07-21",
+  "network": "regtest",
+  "block_height": 218,
+  "review_verified": true,
+  "fee_sat": 1000,
+  "freeze_id": "8dd29283c92cde6c07bb1e96e259a8cc955b21fef886e6a2ad73acc5ebc75c81",
+  "wrong_freeze_rejected": true,
+  "signature_verified": true,
+  "bitcoin_core_finalize_complete": true,
+  "txid": "0b65a4381a71bd0aee4b6f4e9d1df8d97918c22eb85a579f7a4f0b9c2aaf1c77",
+  "sighash": "c58f9ada029be9033878256bd0a60e58c4cb91c31fbc54e548ba782f7ecdbca8",
+  "confirmations": 1,
+  "mempool_count_after_confirmation": 0
+}

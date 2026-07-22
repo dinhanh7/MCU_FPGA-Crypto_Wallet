@@ -1,0 +1,844 @@
+/*
+ * coldsign.c - educational Bitcoin P2WPKH signer for Regtest.
+ *
+ * Hardware-oriented reference model:
+ *   - BIP143 SIGHASH_ALL preimage
+ *   - RFC6979 deterministic nonce (HMAC-SHA256)
+ *   - secp256k1 point arithmetic (affine double-and-add)
+ *   - ECDSA signing with low-S normalization
+ *   - DER serialization and SegWit witness assembly
+ *
+ * OpenSSL is used only for BIGNUM, SHA256, RIPEMD160, HMAC and RAND.
+ * This code is intentionally straightforward, not constant-time, and MUST NOT
+ * be used with mainnet keys or production funds.
+ *
+ * Supported transaction shape: one unsigned native P2WPKH input, any outputs,
+ * SIGHASH_ALL.
+ */
+
+#include <errno.h>
+#include <fcntl.h>
+#include <openssl/bn.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/ripemd.h>
+#include <openssl/sha.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+typedef struct {
+    BIGNUM *x;
+    BIGNUM *y;
+    int infinity;
+} Point;
+
+typedef struct {
+    uint8_t *p;
+    size_t len;
+    size_t cap;
+} Buffer;
+
+typedef struct {
+    const uint8_t *raw;
+    size_t raw_len;
+    const uint8_t *version;
+    const uint8_t *vin_count;
+    size_t vin_count_len;
+    const uint8_t *input;
+    size_t input_len;
+    const uint8_t *outpoint;
+    const uint8_t *sequence;
+    const uint8_t *vout_count;
+    size_t vout_count_len;
+    const uint8_t *outputs;
+    size_t outputs_len;
+    const uint8_t *locktime;
+} ParsedTx;
+
+static BIGNUM *P_FIELD;
+static BIGNUM *N_ORDER;
+static BIGNUM *GX;
+static BIGNUM *GY;
+static BIGNUM *N_HALF;
+static BN_CTX *CTX;
+
+static void die(const char *msg)
+{
+    fprintf(stderr, "error: %s\n", msg);
+    exit(1);
+}
+
+static void die_ssl(const char *msg)
+{
+    fprintf(stderr, "openssl error: %s\n", msg);
+    exit(1);
+}
+
+static void curve_init(void)
+{
+    CTX = BN_CTX_new();
+    BN_hex2bn(&P_FIELD, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+    BN_hex2bn(&N_ORDER, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+    BN_hex2bn(&GX, "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
+    BN_hex2bn(&GY, "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
+    N_HALF = BN_dup(N_ORDER);
+    if (!CTX || !P_FIELD || !N_ORDER || !GX || !GY || !N_HALF)
+        die_ssl("curve initialization");
+    BN_rshift1(N_HALF, N_HALF);
+}
+
+static void curve_free(void)
+{
+    BN_free(P_FIELD);
+    BN_free(N_ORDER);
+    BN_free(GX);
+    BN_free(GY);
+    BN_free(N_HALF);
+    BN_CTX_free(CTX);
+}
+
+static Point point_new(void)
+{
+    Point p = {BN_new(), BN_new(), 1};
+    if (!p.x || !p.y) die_ssl("point allocation");
+    return p;
+}
+
+static void point_free(Point *p)
+{
+    BN_free(p->x);
+    BN_free(p->y);
+    p->x = p->y = NULL;
+}
+
+static void point_copy(Point *dst, const Point *src)
+{
+    dst->infinity = src->infinity;
+    if (!src->infinity) {
+        BN_copy(dst->x, src->x);
+        BN_copy(dst->y, src->y);
+    }
+}
+
+static void point_generator(Point *g)
+{
+    g->infinity = 0;
+    BN_copy(g->x, GX);
+    BN_copy(g->y, GY);
+}
+
+/* Affine point doubling: lambda=(3*x^2)/(2*y), x3=lambda^2-2*x. */
+static void point_double(Point *r, const Point *a)
+{
+    if (a->infinity || BN_is_zero(a->y)) {
+        r->infinity = 1;
+        return;
+    }
+
+    BN_CTX_start(CTX);
+    BIGNUM *num = BN_CTX_get(CTX);
+    BIGNUM *den = BN_CTX_get(CTX);
+    BIGNUM *inv = BN_CTX_get(CTX);
+    BIGNUM *lam = BN_CTX_get(CTX);
+    BIGNUM *x3 = BN_CTX_get(CTX);
+    BIGNUM *y3 = BN_CTX_get(CTX);
+    BIGNUM *tmp = BN_CTX_get(CTX);
+    if (!tmp) die_ssl("BN_CTX point_double");
+
+    BN_mod_sqr(num, a->x, P_FIELD, CTX);
+    BN_mul_word(num, 3);
+    BN_mod(num, num, P_FIELD, CTX);
+    BN_mod_lshift1(den, a->y, P_FIELD, CTX);
+    if (!BN_mod_inverse(inv, den, P_FIELD, CTX)) die_ssl("point_double inverse");
+    BN_mod_mul(lam, num, inv, P_FIELD, CTX);
+
+    BN_mod_sqr(x3, lam, P_FIELD, CTX);
+    BN_mod_lshift1(tmp, a->x, P_FIELD, CTX);
+    BN_mod_sub(x3, x3, tmp, P_FIELD, CTX);
+
+    BN_mod_sub(tmp, a->x, x3, P_FIELD, CTX);
+    BN_mod_mul(y3, lam, tmp, P_FIELD, CTX);
+    BN_mod_sub(y3, y3, a->y, P_FIELD, CTX);
+
+    BN_copy(r->x, x3);
+    BN_copy(r->y, y3);
+    r->infinity = 0;
+    BN_CTX_end(CTX);
+}
+
+/* Affine point addition. */
+static void point_add(Point *r, const Point *a, const Point *b)
+{
+    if (a->infinity) {
+        point_copy(r, b);
+        return;
+    }
+    if (b->infinity) {
+        point_copy(r, a);
+        return;
+    }
+    if (BN_cmp(a->x, b->x) == 0) {
+        if (BN_cmp(a->y, b->y) == 0) point_double(r, a);
+        else r->infinity = 1;
+        return;
+    }
+
+    BN_CTX_start(CTX);
+    BIGNUM *num = BN_CTX_get(CTX);
+    BIGNUM *den = BN_CTX_get(CTX);
+    BIGNUM *inv = BN_CTX_get(CTX);
+    BIGNUM *lam = BN_CTX_get(CTX);
+    BIGNUM *x3 = BN_CTX_get(CTX);
+    BIGNUM *y3 = BN_CTX_get(CTX);
+    BIGNUM *tmp = BN_CTX_get(CTX);
+    if (!tmp) die_ssl("BN_CTX point_add");
+
+    BN_mod_sub(num, b->y, a->y, P_FIELD, CTX);
+    BN_mod_sub(den, b->x, a->x, P_FIELD, CTX);
+    if (!BN_mod_inverse(inv, den, P_FIELD, CTX)) die_ssl("point_add inverse");
+    BN_mod_mul(lam, num, inv, P_FIELD, CTX);
+
+    BN_mod_sqr(x3, lam, P_FIELD, CTX);
+    BN_mod_sub(x3, x3, a->x, P_FIELD, CTX);
+    BN_mod_sub(x3, x3, b->x, P_FIELD, CTX);
+
+    BN_mod_sub(tmp, a->x, x3, P_FIELD, CTX);
+    BN_mod_mul(y3, lam, tmp, P_FIELD, CTX);
+    BN_mod_sub(y3, y3, a->y, P_FIELD, CTX);
+
+    BN_copy(r->x, x3);
+    BN_copy(r->y, y3);
+    r->infinity = 0;
+    BN_CTX_end(CTX);
+}
+
+/* Educational double-and-add scalar multiplication, LSB first. */
+static void scalar_mul(Point *r, const BIGNUM *k, const Point *p)
+{
+    Point acc = point_new();
+    Point add = point_new();
+    Point tmp = point_new();
+    point_copy(&add, p);
+
+    int bits = BN_num_bits(k);
+    for (int i = 0; i < bits; ++i) {
+        if (BN_is_bit_set(k, i)) {
+            point_add(&tmp, &acc, &add);
+            point_copy(&acc, &tmp);
+        }
+        point_double(&tmp, &add);
+        point_copy(&add, &tmp);
+    }
+    point_copy(r, &acc);
+    point_free(&acc);
+    point_free(&add);
+    point_free(&tmp);
+}
+
+static void sha256_once(const uint8_t *in, size_t len, uint8_t out[32])
+{
+    SHA256(in, len, out);
+}
+
+static void sha256d(const uint8_t *in, size_t len, uint8_t out[32])
+{
+    uint8_t tmp[32];
+    SHA256(in, len, tmp);
+    SHA256(tmp, sizeof(tmp), out);
+}
+
+static void hash160(const uint8_t *in, size_t len, uint8_t out[20])
+{
+    uint8_t sha[32];
+    SHA256(in, len, sha);
+    if (!RIPEMD160(sha, sizeof(sha), out)) die_ssl("HASH160");
+}
+
+static void hmac256(const uint8_t key[32], const uint8_t *data, size_t len,
+                    uint8_t out[32])
+{
+    unsigned int out_len = 0;
+    if (!HMAC(EVP_sha256(), key, 32, data, len, out, &out_len) || out_len != 32)
+        die_ssl("HMAC-SHA256");
+}
+
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static uint8_t *hex_decode(const char *hex, size_t *out_len)
+{
+    size_t n = strlen(hex);
+    while (n && (hex[n - 1] == '\n' || hex[n - 1] == '\r' || hex[n - 1] == ' '))
+        --n;
+    if (n == 0 || (n & 1)) die("invalid hex length");
+    uint8_t *out = malloc(n / 2);
+    if (!out) die("out of memory");
+    for (size_t i = 0; i < n; i += 2) {
+        int hi = hex_value(hex[i]), lo = hex_value(hex[i + 1]);
+        if (hi < 0 || lo < 0) die("invalid hex character");
+        out[i / 2] = (uint8_t)((hi << 4) | lo);
+    }
+    *out_len = n / 2;
+    return out;
+}
+
+static void hex_print(const uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) printf("%02x", p[i]);
+}
+
+static void bn_to_32(const BIGNUM *v, uint8_t out[32])
+{
+    if (BN_bn2binpad(v, out, 32) != 32) die_ssl("BN_bn2binpad");
+}
+
+static BIGNUM *read_key(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) die("cannot open key file");
+    char s[256];
+    if (!fgets(s, sizeof(s), f)) die("cannot read key file");
+    fclose(f);
+    size_t n;
+    uint8_t *raw = hex_decode(s, &n);
+    if (n != 32) die("private key must be 32 bytes");
+    BIGNUM *d = BN_bin2bn(raw, 32, NULL);
+    OPENSSL_cleanse(raw, n);
+    free(raw);
+    if (!d || BN_is_zero(d) || BN_cmp(d, N_ORDER) >= 0) die("invalid private key");
+    return d;
+}
+
+static void write_key(const char *path, const uint8_t raw[32])
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) die("key file exists or cannot be created");
+    char s[65];
+    for (int i = 0; i < 32; ++i) snprintf(s + i * 2, 3, "%02x", raw[i]);
+    s[64] = '\n';
+    if (write(fd, s, 65) != 65) die("cannot write key file");
+    fsync(fd);
+    close(fd);
+    OPENSSL_cleanse(s, sizeof(s));
+}
+
+static void compressed_pubkey(const BIGNUM *d, uint8_t out[33])
+{
+    Point g = point_new(), q = point_new();
+    point_generator(&g);
+    scalar_mul(&q, d, &g);
+    if (q.infinity) die("invalid public key");
+    out[0] = BN_is_odd(q.y) ? 0x03 : 0x02;
+    if (BN_bn2binpad(q.x, out + 1, 32) != 32) die_ssl("pubkey serialization");
+    point_free(&g);
+    point_free(&q);
+}
+
+static void buf_init(Buffer *b, size_t cap)
+{
+    b->p = malloc(cap);
+    if (!b->p) die("out of memory");
+    b->len = 0;
+    b->cap = cap;
+}
+
+static void buf_put(Buffer *b, const void *p, size_t n)
+{
+    if (b->len + n > b->cap) {
+        size_t cap = (b->len + n) * 2 + 64;
+        uint8_t *q = realloc(b->p, cap);
+        if (!q) die("out of memory");
+        b->p = q;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, p, n);
+    b->len += n;
+}
+
+static void buf_u8(Buffer *b, uint8_t v)
+{
+    buf_put(b, &v, 1);
+}
+
+static void buf_u32le(Buffer *b, uint32_t v)
+{
+    uint8_t x[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+    buf_put(b, x, 4);
+}
+
+static void buf_u64le(Buffer *b, uint64_t v)
+{
+    uint8_t x[8];
+    for (int i = 0; i < 8; ++i) x[i] = (uint8_t)(v >> (8 * i));
+    buf_put(b, x, 8);
+}
+
+static uint64_t read_u64le(const uint8_t *p)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= ((uint64_t)p[i]) << (8 * i);
+    return v;
+}
+
+static uint64_t parse_varint(const uint8_t *p, size_t len, size_t *used)
+{
+    if (!len) die("truncated CompactSize");
+    if (p[0] < 0xfd) {
+        *used = 1;
+        return p[0];
+    }
+    if (p[0] == 0xfd) {
+        if (len < 3) die("truncated CompactSize");
+        *used = 3;
+        return (uint64_t)p[1] | ((uint64_t)p[2] << 8);
+    }
+    if (p[0] == 0xfe) {
+        if (len < 5) die("truncated CompactSize");
+        *used = 5;
+        return (uint64_t)p[1] | ((uint64_t)p[2] << 8) |
+               ((uint64_t)p[3] << 16) | ((uint64_t)p[4] << 24);
+    }
+    if (len < 9) die("truncated CompactSize");
+    *used = 9;
+    return read_u64le(p + 1);
+}
+
+static void parse_unsigned_tx(const uint8_t *raw, size_t len, ParsedTx *t)
+{
+    if (len < 10) die("transaction too short");
+    size_t off = 0, used;
+    memset(t, 0, sizeof(*t));
+    t->raw = raw;
+    t->raw_len = len;
+    t->version = raw;
+    off += 4;
+
+    if (raw[off] == 0x00 && off + 1 < len && raw[off + 1] != 0x00)
+        die("input transaction must be unsigned non-witness serialization");
+
+    t->vin_count = raw + off;
+    uint64_t vin_n = parse_varint(raw + off, len - off, &used);
+    t->vin_count_len = used;
+    off += used;
+    if (vin_n != 1) die("reference signer supports exactly one input");
+
+    size_t input_start = off;
+    if (off + 36 > len) die("truncated input outpoint");
+    t->outpoint = raw + off;
+    off += 36;
+    uint64_t script_len = parse_varint(raw + off, len - off, &used);
+    off += used;
+    if (script_len != 0) die("unsigned input scriptSig must be empty");
+    if (off + script_len + 4 > len) die("truncated input");
+    off += script_len;
+    t->sequence = raw + off;
+    off += 4;
+    t->input = raw + input_start;
+    t->input_len = off - input_start;
+
+    t->vout_count = raw + off;
+    uint64_t vout_n = parse_varint(raw + off, len - off, &used);
+    t->vout_count_len = used;
+    off += used;
+    if (vout_n == 0) die("transaction has no outputs");
+    size_t outputs_start = off;
+    for (uint64_t i = 0; i < vout_n; ++i) {
+        if (off + 8 > len) die("truncated output value");
+        off += 8;
+        uint64_t sl = parse_varint(raw + off, len - off, &used);
+        off += used;
+        if (sl > len - off) die("truncated output script");
+        off += (size_t)sl;
+    }
+    t->outputs = raw + outputs_start;
+    t->outputs_len = off - outputs_start;
+    if (off + 4 != len) die("unexpected bytes after locktime");
+    t->locktime = raw + off;
+}
+
+static void bip143_sighash(const ParsedTx *t, const uint8_t pubkey_hash[20],
+                           uint64_t amount_sat, uint8_t out[32])
+{
+    uint8_t hp[32], hs[32], ho[32];
+    sha256d(t->outpoint, 36, hp);
+    sha256d(t->sequence, 4, hs);
+    sha256d(t->outputs, t->outputs_len, ho);
+
+    uint8_t script_code[26] = {
+        0x19, 0x76, 0xa9, 0x14,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0x88, 0xac
+    };
+    memcpy(script_code + 4, pubkey_hash, 20);
+
+    Buffer b;
+    buf_init(&b, 182);
+    buf_put(&b, t->version, 4);
+    buf_put(&b, hp, 32);
+    buf_put(&b, hs, 32);
+    buf_put(&b, t->outpoint, 36);
+    buf_put(&b, script_code, sizeof(script_code));
+    buf_u64le(&b, amount_sat);
+    buf_put(&b, t->sequence, 4);
+    buf_put(&b, ho, 32);
+    buf_put(&b, t->locktime, 4);
+    buf_u32le(&b, 1); /* SIGHASH_ALL */
+    sha256d(b.p, b.len, out);
+    OPENSSL_cleanse(b.p, b.cap);
+    free(b.p);
+}
+
+/* RFC6979 section 3.2, using SHA256 and bits2octets(h1). */
+static BIGNUM *rfc6979_nonce(const BIGNUM *d, const uint8_t digest[32])
+{
+    uint8_t x[32], h1[32], K[32], V[32], data[97];
+    bn_to_32(d, x);
+
+    BIGNUM *h_bn = BN_bin2bn(digest, 32, NULL);
+    BIGNUM *h_mod = BN_new();
+    BN_mod(h_mod, h_bn, N_ORDER, CTX);
+    bn_to_32(h_mod, h1);
+    BN_free(h_bn);
+    BN_free(h_mod);
+
+    memset(K, 0x00, 32);
+    memset(V, 0x01, 32);
+
+    memcpy(data, V, 32);
+    data[32] = 0x00;
+    memcpy(data + 33, x, 32);
+    memcpy(data + 65, h1, 32);
+    hmac256(K, data, 97, K);
+    hmac256(K, V, 32, V);
+
+    memcpy(data, V, 32);
+    data[32] = 0x01;
+    memcpy(data + 33, x, 32);
+    memcpy(data + 65, h1, 32);
+    hmac256(K, data, 97, K);
+    hmac256(K, V, 32, V);
+
+    for (;;) {
+        hmac256(K, V, 32, V);
+        BIGNUM *k = BN_bin2bn(V, 32, NULL);
+        if (k && !BN_is_zero(k) && BN_cmp(k, N_ORDER) < 0) {
+            OPENSSL_cleanse(x, sizeof(x));
+            OPENSSL_cleanse(h1, sizeof(h1));
+            OPENSSL_cleanse(K, sizeof(K));
+            OPENSSL_cleanse(V, sizeof(V));
+            OPENSSL_cleanse(data, sizeof(data));
+            return k;
+        }
+        BN_free(k);
+        memcpy(data, V, 32);
+        data[32] = 0x00;
+        hmac256(K, data, 33, K);
+        hmac256(K, V, 32, V);
+    }
+}
+
+static void ecdsa_sign(const BIGNUM *d, const uint8_t digest[32],
+                       BIGNUM *r, BIGNUM *s)
+{
+    Point g = point_new(), R = point_new();
+    point_generator(&g);
+    BIGNUM *z = BN_bin2bn(digest, 32, NULL);
+
+    for (;;) {
+        BIGNUM *k = rfc6979_nonce(d, digest);
+        scalar_mul(&R, k, &g);
+        BN_mod(r, R.x, N_ORDER, CTX);
+        if (BN_is_zero(r)) {
+            BN_free(k);
+            continue;
+        }
+
+        BN_CTX_start(CTX);
+        BIGNUM *kinv = BN_CTX_get(CTX);
+        BIGNUM *tmp = BN_CTX_get(CTX);
+        if (!tmp) die_ssl("BN_CTX ecdsa_sign");
+        if (!BN_mod_inverse(kinv, k, N_ORDER, CTX)) die_ssl("ECDSA inverse");
+        BN_mod_mul(tmp, r, d, N_ORDER, CTX);
+        BN_mod_add(tmp, tmp, z, N_ORDER, CTX);
+        BN_mod_mul(s, kinv, tmp, N_ORDER, CTX);
+        BN_CTX_end(CTX);
+        BN_free(k);
+        if (!BN_is_zero(s)) break;
+    }
+
+    /* Bitcoin standardness: normalize to low-S. */
+    if (BN_cmp(s, N_HALF) > 0) BN_sub(s, N_ORDER, s);
+    BN_free(z);
+    point_free(&g);
+    point_free(&R);
+}
+
+static int ecdsa_verify(const Point *q, const uint8_t digest[32],
+                        const BIGNUM *r, const BIGNUM *s)
+{
+    if (BN_is_zero(r) || BN_cmp(r, N_ORDER) >= 0 ||
+        BN_is_zero(s) || BN_cmp(s, N_ORDER) >= 0) return 0;
+
+    BIGNUM *z = BN_bin2bn(digest, 32, NULL);
+    BIGNUM *w = BN_mod_inverse(NULL, s, N_ORDER, CTX);
+    BIGNUM *u1 = BN_new(), *u2 = BN_new(), *v = BN_new();
+    BN_mod_mul(u1, z, w, N_ORDER, CTX);
+    BN_mod_mul(u2, r, w, N_ORDER, CTX);
+
+    Point g = point_new(), a = point_new(), b = point_new(), sum = point_new();
+    point_generator(&g);
+    scalar_mul(&a, u1, &g);
+    scalar_mul(&b, u2, q);
+    point_add(&sum, &a, &b);
+    int ok = 0;
+    if (!sum.infinity) {
+        BN_mod(v, sum.x, N_ORDER, CTX);
+        ok = BN_cmp(v, r) == 0;
+    }
+
+    BN_free(z); BN_free(w); BN_free(u1); BN_free(u2); BN_free(v);
+    point_free(&g); point_free(&a); point_free(&b); point_free(&sum);
+    return ok;
+}
+
+static size_t der_integer(const BIGNUM *v, uint8_t *out)
+{
+    int n = BN_num_bytes(v);
+    uint8_t tmp[33];
+    BN_bn2bin(v, tmp + 1);
+    int pad = (tmp[1] & 0x80) != 0;
+    out[0] = 0x02;
+    out[1] = (uint8_t)(n + pad);
+    if (pad) out[2] = 0x00;
+    memcpy(out + 2 + pad, tmp + 1, n);
+    return (size_t)(2 + n + pad);
+}
+
+static size_t der_signature(const BIGNUM *r, const BIGNUM *s, uint8_t out[72])
+{
+    uint8_t body[70];
+    size_t rn = der_integer(r, body);
+    size_t sn = der_integer(s, body + rn);
+    out[0] = 0x30;
+    out[1] = (uint8_t)(rn + sn);
+    memcpy(out + 2, body, rn + sn);
+    return 2 + rn + sn;
+}
+
+static uint8_t *assemble_witness_tx(const ParsedTx *t, const uint8_t *der,
+                                    size_t der_len, const uint8_t pub[33],
+                                    size_t *out_len)
+{
+    Buffer b;
+    buf_init(&b, t->raw_len + 128);
+    buf_put(&b, t->version, 4);
+    buf_u8(&b, 0x00);
+    buf_u8(&b, 0x01);
+    buf_put(&b, t->vin_count, t->vin_count_len);
+    buf_put(&b, t->input, t->input_len);
+    buf_put(&b, t->vout_count, t->vout_count_len);
+    buf_put(&b, t->outputs, t->outputs_len);
+    buf_u8(&b, 0x02);
+    buf_u8(&b, (uint8_t)(der_len + 1));
+    buf_put(&b, der, der_len);
+    buf_u8(&b, 0x01); /* SIGHASH_ALL */
+    buf_u8(&b, 33);
+    buf_put(&b, pub, 33);
+    buf_put(&b, t->locktime, 4);
+    *out_len = b.len;
+    return b.p;
+}
+
+static void cmd_keygen(const char *path)
+{
+    uint8_t raw[32];
+    BIGNUM *d = NULL;
+    do {
+        if (RAND_bytes(raw, sizeof(raw)) != 1) die_ssl("RAND_bytes");
+        BN_free(d);
+        d = BN_bin2bn(raw, 32, NULL);
+    } while (!d || BN_is_zero(d) || BN_cmp(d, N_ORDER) >= 0);
+    write_key(path, raw);
+    OPENSSL_cleanse(raw, sizeof(raw));
+    BN_free(d);
+    printf("created %s (mode 0600)\n", path);
+}
+
+static void cmd_info(const char *path)
+{
+    BIGNUM *d = read_key(path);
+    uint8_t pub[33], h160[20];
+    compressed_pubkey(d, pub);
+    hash160(pub, sizeof(pub), h160);
+    printf("{\"pubkey\":\"");
+    hex_print(pub, sizeof(pub));
+    printf("\",\"pubkey_hash\":\"");
+    hex_print(h160, sizeof(h160));
+    printf("\",\"script_pubkey\":\"0014");
+    hex_print(h160, sizeof(h160));
+    printf("\"}\n");
+    BN_clear_free(d);
+}
+
+static void sign_digest_and_print(const BIGNUM *d, const uint8_t digest[32])
+{
+    BIGNUM *r = BN_new(), *s = BN_new();
+    uint8_t der[72];
+    ecdsa_sign(d, digest, r, s);
+    size_t der_len = der_signature(r, s, der);
+    uint8_t rb[32], sb[32];
+    bn_to_32(r, rb);
+    bn_to_32(s, sb);
+    printf("{\"digest\":\""); hex_print(digest, 32);
+    printf("\",\"r\":\""); hex_print(rb, 32);
+    printf("\",\"s\":\""); hex_print(sb, 32);
+    printf("\",\"der\":\""); hex_print(der, der_len);
+    printf("\"}\n");
+    BN_clear_free(r); BN_clear_free(s);
+}
+
+static void tx_digest(const BIGNUM *d, const char *tx_hex, uint64_t amount,
+                      ParsedTx *tx, uint8_t **raw_ret, uint8_t digest[32],
+                      uint8_t pub[33])
+{
+    size_t raw_len;
+    uint8_t *raw = hex_decode(tx_hex, &raw_len);
+    parse_unsigned_tx(raw, raw_len, tx);
+    uint8_t h160[20];
+    compressed_pubkey(d, pub);
+    hash160(pub, 33, h160);
+    bip143_sighash(tx, h160, amount, digest);
+    *raw_ret = raw;
+}
+
+static void cmd_sighash(const char *key, const char *tx_hex, uint64_t amount)
+{
+    BIGNUM *d = read_key(key);
+    ParsedTx tx;
+    uint8_t *raw, digest[32], pub[33];
+    tx_digest(d, tx_hex, amount, &tx, &raw, digest, pub);
+    hex_print(digest, 32);
+    putchar('\n');
+    OPENSSL_cleanse(raw, tx.raw_len);
+    free(raw);
+    BN_clear_free(d);
+}
+
+static void cmd_sign_digest(const char *key, const char *digest_hex)
+{
+    size_t n;
+    uint8_t *digest = hex_decode(digest_hex, &n);
+    if (n != 32) die("digest must be 32 bytes");
+    BIGNUM *d = read_key(key);
+    sign_digest_and_print(d, digest);
+    BN_clear_free(d);
+    OPENSSL_cleanse(digest, n);
+    free(digest);
+}
+
+static void cmd_sign_tx(const char *key, const char *tx_hex, uint64_t amount)
+{
+    BIGNUM *d = read_key(key);
+    ParsedTx tx;
+    uint8_t *raw, digest[32], pub[33];
+    tx_digest(d, tx_hex, amount, &tx, &raw, digest, pub);
+
+    BIGNUM *r = BN_new(), *s = BN_new();
+    uint8_t der[72];
+    ecdsa_sign(d, digest, r, s);
+    size_t der_len = der_signature(r, s, der);
+    size_t signed_len;
+    uint8_t *signed_tx = assemble_witness_tx(&tx, der, der_len, pub, &signed_len);
+    hex_print(signed_tx, signed_len);
+    putchar('\n');
+
+    OPENSSL_cleanse(raw, tx.raw_len);
+    OPENSSL_cleanse(signed_tx, signed_len);
+    free(raw); free(signed_tx);
+    BN_clear_free(d); BN_clear_free(r); BN_clear_free(s);
+}
+
+static void cmd_selftest(void)
+{
+    /* Fixed private key and digest make this a deterministic regression test. */
+    BIGNUM *d = NULL;
+    BN_hex2bn(&d, "1E99423A4ED27608A15A2616A2B0E9E52CED330AC530EDCC32C8FFC6A526AEDD");
+    uint8_t digest[32];
+    sha256_once((const uint8_t *)"cold-wallet-verilog-reference", 29, digest);
+    BIGNUM *r = BN_new(), *s = BN_new();
+    ecdsa_sign(d, digest, r, s);
+
+    Point g = point_new(), q = point_new();
+    point_generator(&g);
+    scalar_mul(&q, d, &g);
+    if (!ecdsa_verify(&q, digest, r, s)) die("ECDSA self-test failed");
+
+    uint8_t der[72];
+    size_t der_len = der_signature(r, s, der);
+    printf("SELFTEST_OK\n");
+    printf("digest="); hex_print(digest, 32); putchar('\n');
+    printf("r="); {
+        uint8_t x[32]; bn_to_32(r, x); hex_print(x, 32); putchar('\n');
+    }
+    printf("s="); {
+        uint8_t x[32]; bn_to_32(s, x); hex_print(x, 32); putchar('\n');
+    }
+    printf("der="); hex_print(der, der_len); putchar('\n');
+
+    BN_clear_free(d); BN_clear_free(r); BN_clear_free(s);
+    point_free(&g); point_free(&q);
+}
+
+static uint64_t parse_amount(const char *s)
+{
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno || !end || *end) die("amount must be integer satoshis");
+    return (uint64_t)v;
+}
+
+static void usage(const char *argv0)
+{
+    fprintf(stderr,
+        "Usage:\n"
+        "  %s keygen KEYFILE\n"
+        "  %s info KEYFILE\n"
+        "  %s sign-digest KEYFILE DIGEST32_HEX\n"
+        "  %s sighash-p2wpkh KEYFILE UNSIGNED_TX_HEX PREVOUT_SAT\n"
+        "  %s sign-p2wpkh KEYFILE UNSIGNED_TX_HEX PREVOUT_SAT\n"
+        "  %s selftest\n",
+        argv0, argv0, argv0, argv0, argv0, argv0);
+    exit(2);
+}
+
+int main(int argc, char **argv)
+{
+    curve_init();
+    if (argc == 3 && strcmp(argv[1], "keygen") == 0)
+        cmd_keygen(argv[2]);
+    else if (argc == 3 && strcmp(argv[1], "info") == 0)
+        cmd_info(argv[2]);
+    else if (argc == 4 && strcmp(argv[1], "sign-digest") == 0)
+        cmd_sign_digest(argv[2], argv[3]);
+    else if (argc == 5 && strcmp(argv[1], "sighash-p2wpkh") == 0)
+        cmd_sighash(argv[2], argv[3], parse_amount(argv[4]));
+    else if (argc == 5 && strcmp(argv[1], "sign-p2wpkh") == 0)
+        cmd_sign_tx(argv[2], argv[3], parse_amount(argv[4]));
+    else if (argc == 2 && strcmp(argv[1], "selftest") == 0)
+        cmd_selftest();
+    else
+        usage(argv[0]);
+    curve_free();
+    return 0;
+}

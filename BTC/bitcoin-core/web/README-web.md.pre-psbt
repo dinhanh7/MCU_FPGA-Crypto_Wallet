@@ -1,0 +1,76 @@
+# Bitcoin Regtest C Cold Signer Web
+
+Web này chỉ cho phép một đường ký/gửi giao dịch:
+
+```text
+unsigned transaction -> C signer -> Bitcoin Core validation/broadcast
+```
+
+Wallet Bitcoin Core thông thường vẫn được dùng để quản lý và tạo địa chỉ nhận.
+Không có API ký hoặc gửi coin từ các wallet này.
+
+## Chức năng
+
+- Xem network, block height và mempool.
+- Tạo/load wallet nhận coin.
+- Tạo một địa chỉ nhận cố định cho mỗi wallet bằng label `web-fixed`, rồi tự
+  điền vào trường receiver của C signer.
+- Tạo nhiều C-signer source wallet.
+- Chọn chính xác C-signer wallet dùng làm nguồn gửi.
+- Xem địa chỉ, public key và số dư từng C signer.
+- Xác nhận Bitcoin Core wallet `coldwatch` không có private key.
+- Nhập địa chỉ nhận và amount để C signer ký.
+- Đào block trực tiếp vào địa chỉ C signer; thao tác mining không ký giao dịch.
+- Xem TXID, sighash và confirmations gần nhất.
+
+## API còn hoạt động
+
+```text
+GET  /api/status
+POST /api/wallet
+POST /api/address
+POST /api/cold/wallet
+POST /api/cold/send
+POST /api/cold/mine
+```
+
+Ví dụ gửi:
+
+```json
+{"source":"coldwatch","address":"bcrt1...","amount":"0.01"}
+```
+
+Ví dụ đào:
+
+```json
+{"source":"coldwatch","count":1}
+```
+
+## Lưu key
+
+Wallet Bitcoin Core thông thường lưu descriptor và private key trong:
+
+```text
+bitcoin-core/data/regtest/wallets/WALLET_NAME/wallet.dat
+```
+
+C-signer wallet lưu private key riêng tại:
+
+```text
+bitcoin-core/c-signer/keys/SOURCE_NAME.key
+```
+
+Các file C key có mode `0600`. Public key/descriptor tương ứng nằm trong
+Bitcoin Core watch-only wallet `c_SOURCE_NAME`; Core wallet này có
+`private_keys_enabled: false`.
+
+Địa chỉ nhận của wallet thường được tạo một lần bằng `getnewaddress
+"web-fixed"`. Những lần gọi tiếp theo đọc lại địa chỉ từ
+`getaddressesbylabel "web-fixed"` nên không đổi.
+
+## Tiến trình
+
+Web chạy tại `127.0.0.1:8787` trong tmux session `btc`, window
+`dashboard`. TryCloudflare chạy trong window `tunnel`.
+
+Đây là Regtest reference cho nghiên cứu/Verilog, không dùng với mainnet.

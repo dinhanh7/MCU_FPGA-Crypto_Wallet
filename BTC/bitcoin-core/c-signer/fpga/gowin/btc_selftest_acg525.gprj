@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE gowin-fpga-project>
+<Project>
+  <Template>FPGA</Template>
+  <Version>5</Version>
+  <Device name="GW5A-25A" pn="GW5A-LV25UG324C2/I1">gw5a25a-008</Device>
+  <FileList>
+    <File path="acg525_btc_selftest_top.sv" type="file.verilog" enable="1"/>
+    <File path="../rtl/btc_private_key_rtl.svh" type="file.other" enable="1"/>
+    <File path="../../../../../ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modaddsub256_seq.sv" type="file.verilog" enable="1"/>
+    <File path="../../../../../ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modmul256_controller.sv" type="file.verilog" enable="1"/>
+    <File path="../../../../../ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/modinv256_controller.sv" type="file.verilog" enable="1"/>
+    <File path="../../../../../ETH/anvil_cold_wallet/c_signer/verilog_rtl/rtl/secp256k1_point_mul.sv" type="file.verilog" enable="1"/>
+    <File path="../rtl/btc_sha256_stream.sv" type="file.verilog" enable="1"/>
+    <File path="../rtl/btc_bip143_hash.sv" type="file.verilog" enable="1"/>
+    <File path="../rtl/btc_rfc6979_hmac_sha256.sv" type="file.verilog" enable="1"/>
+    <File path="../rtl/btc_rfc6979_nonce.sv" type="file.verilog" enable="1"/>
+    <File path="../rtl/btc_ecdsa_sign_verify_core.sv" type="file.verilog" enable="1"/>
+    <File path="../rtl/btc_fpga_signer_core.sv" type="file.verilog" enable="1"/>
+    <File path="acg525_selftest.cst" type="file.cst" enable="1"/>
+    <File path="acg525.sdc" type="file.sdc" enable="1"/>
+  </FileList>
+</Project>

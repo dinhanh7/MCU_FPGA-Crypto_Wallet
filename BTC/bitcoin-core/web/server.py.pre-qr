@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+import json, os, re, subprocess, threading
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BASE = os.path.expanduser("~/workspace/dinhanh_k68/bitcoin-core")
+CLI = os.path.join(BASE, "bin", "bitcoin-cli")
+DATA = os.path.join(BASE, "data")
+COLD_REGISTRY = os.path.join(BASE, "c-signer", "wallets.json")
+COLD_LAST_FILE = os.path.join(BASE, "c-signer", "tests", "last-web-tx.json")
+COLD_FEE_SAT = 1000
+COLD_LOCK = threading.Lock()
+MAX_BODY = 2 * 1024 * 1024
+
+PAGE = r"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bitcoin MCU Air-gap Wallet</title>
+<style>
+:root{color-scheme:dark;--bg:#09111f;--panel:#121e31;--line:#2b405d;--orange:#f7931a;--muted:#9db0c8;--green:#58d68d;--red:#ff7373}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#09111f,#192941);font:15px system-ui,sans-serif;color:#eef5ff}main{max-width:1000px;margin:auto;padding:28px 16px}h1{color:var(--orange);margin:0}.sub,.hint,.foot{color:var(--muted)}.sub{margin:5px 0 20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.card{background:#121e31ef;border:1px solid var(--line);border-radius:13px;padding:18px;margin-top:14px}.value{font-size:25px;font-weight:700;margin-top:7px}.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.btc{color:var(--orange)}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.field{display:flex;flex-direction:column;gap:5px;flex:1;min-width:190px}input,select,textarea{background:#0a1526;color:#eef5ff;border:1px solid var(--line);border-radius:7px;padding:11px}textarea{width:100%;min-height:85px;resize:vertical;font:12px ui-monospace,monospace}button{background:var(--orange);border:0;border-radius:7px;padding:11px 15px;font-weight:700;cursor:pointer}button.secondary{background:#29415e;color:#fff}.address,code{font-size:12px;word-break:break-all;color:#ffd49c}.wallets{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:14px}.wallet{border:1px solid var(--line);border-radius:10px;padding:13px}.status{min-height:24px;margin-top:12px;color:var(--green)}.error{color:var(--red)}table{width:100%;border-collapse:collapse}td,th{text-align:left;border-bottom:1px solid var(--line);padding:9px}th{color:var(--muted);font-weight:500}.step{border-left:4px solid var(--orange)}.flow{color:#ffd49c;font-size:13px}.hidden{display:none}.warning{border:1px solid #8c682c;background:#2b2415;border-radius:8px;padding:11px;color:#ffd49c}
+</style></head><body><main>
+<h1>₿ Bitcoin Regtest – MCU Cold Wallet</h1><div class="sub">Web không giữ khóa và không có API ký · PSBT được chuyển bằng tệp · <button class="secondary" onclick="refresh()">Làm mới</button></div>
+<div class="grid"><div class="card"><div class="label">Mạng</div><div id="chain" class="value">—</div></div><div class="card"><div class="label">Chiều cao block</div><div id="blocks" class="value">—</div></div><div class="card"><div class="label">Mempool</div><div id="mempool" class="value">—</div></div></div>
+
+<section class="card"><h2>Ví nhận tiền thông thường</h2><div class="row"><div class="field"><label>Tên ví</label><input id="newwallet" placeholder="receiver"></div><button onclick="createWallet()">Tạo / load ví</button></div><div class="row"><div class="field"><label>Ví cần lấy địa chỉ cố định</label><select id="addresswallet"></select></div><button onclick="fixedAddress()">Lấy địa chỉ cố định</button></div><div id="newaddress" class="address"></div><div id="wallets" class="wallets"></div></section>
+
+<section class="card"><h2>Đăng ký ví công khai của MCU</h2><div class="row"><div class="field"><label>Tên nguồn</label><input id="newcoldwallet" placeholder="treasury"></div><div class="field"><label>Khóa công khai nén từ MCU (02/03...)</label><input id="newpubkey" placeholder="03..."></div><button onclick="registerMcuWallet()">Đăng ký watch-only</button></div><div id="coldsources" class="wallets"></div><p class="hint">Web chỉ lưu khóa công khai/descriptor. Khóa bí mật và mã mở khóa không được gửi qua API.</p></section>
+
+<section class="card step"><h2>Bước 1 – Máy trực tuyến tạo PSBT chưa ký</h2><p class="flow">Bitcoin Core chọn một đầu ra chưa chi tiêu → tạo PSBT → bạn tải tệp sang USB/UART/thẻ nhớ.</p><div class="row"><div class="field"><label>Ví MCU gửi tiền</label><select id="coldsource"></select></div><div class="field"><label>Địa chỉ Regtest nhận tiền</label><input id="coldreceiver" placeholder="bcrt1..."></div><div class="field"><label>Số Bitcoin gửi</label><input id="coldamount" type="number" min="0.00000001" step="0.00000001" placeholder="0.01"></div><button onclick="createUnsignedPsbt()">Tạo và tải PSBT chưa ký</button></div><div id="unsignedinfo" class="hidden"><table><tr><th>Tệp</th><td id="unsignedname">—</td></tr><tr><th>Nguồn</th><td id="unsignedsource">—</td></tr><tr><th>Số tiền yêu cầu</th><td id="unsignedamount">—</td></tr><tr><th>Phí dự kiến</th><td id="unsignedfee">—</td></tr></table><button class="secondary" onclick="downloadAgain()">Tải lại tệp PSBT</button></div><p class="warning">Thông tin quyết định ký phải được kiểm tra lại trên màn hình MCU. Web không xác nhận và không thể ký PSBT này.</p></section>
+
+<section class="card step"><h2>Bước 2 – Ký hoàn toàn ngoại tuyến trên MCU/C-signer</h2><p>Chép tệp PSBT sang thiết bị rồi chạy chương trình MCU mô phỏng trong terminal của thiết bị:</p><textarea readonly>cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+bin/coldsign mcu-sign-file keys/KEY.key keys/mcu.passkey unsigned.psbt signed.psbt</textarea><p class="hint">C-signer tự đọc PSBT, tạo freeze_id, hiển thị giao dịch, yêu cầu mã mở khóa và DONG Y. Sai mã hoặc HUY sẽ không tạo tệp đã ký.</p></section>
+
+<section class="card step"><h2>Bước 3 – Tải PSBT đã ký lên máy trực tuyến</h2><p class="flow">Bitcoin Core chỉ hoàn thiện, kiểm tra và phát. Nó không tạo chữ ký.</p><div class="row"><div class="field"><label>Ví nguồn (dùng để theo dõi)</label><select id="broadcastsource"></select></div><div class="field"><label>Tệp signed.psbt từ MCU</label><input id="signedfile" type="file" accept=".psbt,application/octet-stream,text/plain"></div><button onclick="broadcastSignedPsbt()">Kiểm tra → Hoàn thiện → Phát</button></div><table><tr><th>Nguồn gần nhất</th><td id="coldlastsource">—</td></tr><tr><th>TXID gần nhất</th><td><code id="coldtx">—</code></td></tr><tr><th>Số lần xác nhận</th><td id="coldconf">—</td></tr></table></section>
+
+<section class="card"><h2>Đào block Regtest</h2><div class="row"><div class="field"><label>Địa chỉ MCU nhận phần thưởng</label><select id="minesource"></select></div><div class="field"><label>Số block</label><input id="minecount" type="number" min="1" max="1000" value="1"></div><button onclick="mineCold()">Đào</button></div><p class="hint">Đào 1 block để xác nhận giao dịch vừa phát. Việc đào không tạo chữ ký.</p></section>
+<p id="status" class="status"></p><p class="foot">Regtest only. TryCloudflare chỉ phục vụ giao diện máy trực tuyến; không có endpoint ký.</p>
+</main><script>
+const $=id=>document.getElementById(id);let lastUnsigned=null;
+async function api(path,opts={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});const d=await r.json();if(!r.ok)throw Error(d.error||'Yêu cầu thất bại');return d}
+function msg(s,bad=false){$('status').textContent=s;$('status').className=bad?'status error':'status'}
+function btc(sat){return (Number(sat)/100000000).toFixed(8)+' BTC'}
+function b64bytes(s){const b=atob(s),a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i);return a}
+function bytesb64(a){let s='';for(let i=0;i<a.length;i+=0x8000)s+=String.fromCharCode(...a.subarray(i,i+0x8000));return btoa(s)}
+function savePsbt(b64,name){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([b64bytes(b64)],{type:'application/octet-stream'}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+function setWallets(ws){const usable=ws.filter(w=>w.private_keys_enabled),e=$('addresswallet'),old=e.value;e.innerHTML=usable.map(w=>'<option>'+w.name+'</option>').join('');if(usable.some(w=>w.name===old))e.value=old;$('wallets').innerHTML=ws.map(w=>'<div class="wallet"><b>'+w.name+'</b><div class="value btc">'+w.balance+' BTC</div><div class="address">'+(w.fixed_address||'chưa có địa chỉ cố định')+'</div><div class="hint">'+(w.private_keys_enabled?'ví nhận':'watch-only')+'</div></div>').join('')}
+function setSources(c){const ss=c.sources||[];for(const id of ['coldsource','broadcastsource','minesource']){const e=$(id),old=e.value;e.innerHTML=ss.map(s=>'<option value="'+s.name+'">'+s.name+' ('+s.balance+' BTC)</option>').join('');if(ss.some(s=>s.name===old))e.value=old}$('coldsources').innerHTML=ss.map(s=>'<div class="wallet"><b>'+s.name+'</b><div class="value btc">'+s.balance+' BTC</div><div class="address">'+s.address+'</div><div class="address">pubkey: '+s.pubkey+'</div><div class="hint">Bitcoin Core private key: '+(s.private_keys_enabled?'ERROR':'disabled ✓')+'</div></div>').join('')}
+async function refresh(){try{const d=await api('/api/status'),c=d.cold||{};$('chain').textContent=d.chain;$('blocks').textContent=d.blocks;$('mempool').textContent=d.mempool_count;$('coldtx').textContent=c.last_tx||'—';$('coldconf').textContent=c.confirmations??0;$('coldlastsource').textContent=c.last_source||'—';setWallets(d.wallets||[]);setSources(c);msg('Đã cập nhật '+new Date().toLocaleTimeString())}catch(e){msg(e.message,true)}}
+async function createWallet(){try{const name=$('newwallet').value.trim();if(!name)throw Error('Nhập tên ví');await api('/api/wallet',{method:'POST',body:JSON.stringify({name})});$('newwallet').value='';await refresh();msg('Ví đã sẵn sàng: '+name)}catch(e){msg(e.message,true)}}
+async function fixedAddress(){try{const wallet=$('addresswallet').value;if(!wallet)throw Error('Không có ví nhận');const d=await api('/api/address',{method:'POST',body:JSON.stringify({wallet})});$('newaddress').textContent=d.address;$('coldreceiver').value=d.address;await refresh();msg('Đã lấy địa chỉ cố định và điền vào ô người nhận')}catch(e){msg(e.message,true)}}
+async function registerMcuWallet(){try{const name=$('newcoldwallet').value.trim(),pubkey=$('newpubkey').value.trim();const d=await api('/api/mcu/register',{method:'POST',body:JSON.stringify({name,pubkey})});$('newcoldwallet').value='';$('newpubkey').value='';await refresh();msg('Đã đăng ký khóa công khai MCU: '+d.name)}catch(e){msg(e.message,true)}}
+async function createUnsignedPsbt(){try{const d=await api('/api/psbt/create',{method:'POST',body:JSON.stringify({source:$('coldsource').value,address:$('coldreceiver').value.trim(),amount:$('coldamount').value})});lastUnsigned=d;$('unsignedname').textContent=d.filename;$('unsignedsource').textContent=d.source+' · '+d.source_address;$('unsignedamount').textContent=btc(d.amount_sat);$('unsignedfee').textContent=btc(d.fee_sat)+' ('+d.fee_sat+' satoshi)';$('unsignedinfo').classList.remove('hidden');savePsbt(d.psbt,d.filename);msg('Đã tạo và tải PSBT chưa ký. Chuyển tệp sang MCU để kiểm tra và ký.')}catch(e){msg(e.message,true)}}
+function downloadAgain(){if(lastUnsigned)savePsbt(lastUnsigned.psbt,lastUnsigned.filename)}
+async function broadcastSignedPsbt(){try{const f=$('signedfile').files[0];if(!f)throw Error('Chọn tệp signed.psbt từ MCU');const a=new Uint8Array(await f.arrayBuffer());let psbt;if(a.length>=5&&a[0]===0x70&&a[1]===0x73&&a[2]===0x62&&a[3]===0x74&&a[4]===0xff)psbt=bytesb64(a);else psbt=new TextDecoder().decode(a).replace(/\s/g,'');const d=await api('/api/psbt/broadcast',{method:'POST',body:JSON.stringify({source:$('broadcastsource').value,psbt})});msg('Bitcoin Core đã hoàn thiện và phát giao dịch '+d.txid+'. Đào 1 block để xác nhận.');$('signedfile').value='';await refresh()}catch(e){msg(e.message,true)}}
+async function mineCold(){try{const d=await api('/api/cold/mine',{method:'POST',body:JSON.stringify({source:$('minesource').value,count:$('minecount').value})});msg('Đã đào '+d.blocks.length+' block');await refresh()}catch(e){msg(e.message,true)}}
+refresh();setInterval(refresh,5000)
+</script></body></html>"""
+
+def cli(*args):
+    p = subprocess.run([CLI, f"-datadir={DATA}", "-regtest", *args],
+                       capture_output=True, text=True, timeout=20)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip() or "bitcoin-cli failed")
+    out = p.stdout.strip()
+    return json.loads(out) if out.startswith(("{", "[", '"')) else out
+
+def wallet_names():
+    return cli("listwallets")
+
+def ensure_wallet(name):
+    if name not in wallet_names():
+        try: cli("loadwallet", name)
+        except Exception: cli("createwallet", name)
+
+def fixed_receive_address(name, create=False):
+    try:
+        addresses = cli("-rpcwallet="+name, "getaddressesbylabel", "web-fixed")
+        if isinstance(addresses, dict) and addresses:
+            return sorted(addresses)[0]
+    except Exception: pass
+    return cli("-rpcwallet="+name, "getnewaddress", "web-fixed") if create else ""
+
+def wallet_status():
+    result = []
+    for name in wallet_names():
+        try:
+            info = cli("-rpcwallet="+name, "getwalletinfo")
+            result.append({"name":name,
+                           "balance":cli("-rpcwallet="+name, "getbalance"),
+                           "private_keys_enabled":info.get("private_keys_enabled", False),
+                           "fixed_address":fixed_receive_address(name, False)
+                           if info.get("private_keys_enabled") else ""})
+        except Exception: pass
+    return result
+
+def load_registry():
+    with open(COLD_REGISTRY) as f:
+        data = json.load(f)
+    if not isinstance(data.get("wallets"), list):
+        raise RuntimeError("Invalid MCU public wallet registry")
+    return data
+
+def save_registry(data):
+    tmp = COLD_REGISTRY + ".tmp"
+    with open(tmp, "w") as f: json.dump(data, f, indent=2)
+    os.replace(tmp, COLD_REGISTRY)
+
+def find_source(name):
+    for entry in load_registry()["wallets"]:
+        if entry["name"] == name: return entry
+    raise ValueError("Unknown MCU source wallet")
+
+def descriptor_for(pubkey):
+    return cli("getdescriptorinfo", f"wpkh({pubkey})")["descriptor"]
+
+def ensure_watch_wallet(entry):
+    core = entry["core_wallet"]
+    if core not in wallet_names():
+        try: cli("loadwallet", core)
+        except Exception:
+            cli("-named", "createwallet", "wallet_name="+core,
+                "disable_private_keys=true", "blank=true", "descriptors=true",
+                "load_on_startup=true")
+    info = cli("-rpcwallet="+core, "getwalletinfo")
+    if info.get("private_keys_enabled"):
+        raise ValueError("Core wallet collision: private keys must be disabled")
+    desc = descriptor_for(entry["pubkey"])
+    cli("-rpcwallet="+core, "importdescriptors",
+        json.dumps([{"desc":desc, "timestamp":0}]))
+
+def source_info(entry):
+    desc = descriptor_for(entry["pubkey"])
+    core_info = cli("-rpcwallet="+entry["core_wallet"], "getwalletinfo")
+    return {"name":entry["name"], "core_wallet":entry["core_wallet"],
+            "pubkey":entry["pubkey"], "descriptor":desc,
+            "address":cli("deriveaddresses", desc)[0],
+            "balance":cli("-rpcwallet="+entry["core_wallet"], "getbalance"),
+            "private_keys_enabled":core_info.get("private_keys_enabled", True)}
+
+def register_source(name, pubkey):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,48}", name):
+        raise ValueError("Invalid MCU wallet name")
+    if not re.fullmatch(r"(?:02|03)[0-9a-fA-F]{64}", pubkey):
+        raise ValueError("Compressed public key must be 33-byte hex starting 02/03")
+    pubkey = pubkey.lower()
+    with COLD_LOCK:
+        registry = load_registry()
+        for entry in registry["wallets"]:
+            if entry["name"] == name:
+                if entry.get("pubkey") != pubkey:
+                    raise ValueError("Wallet name already registered with another public key")
+                ensure_watch_wallet(entry)
+                return source_info(entry)
+        entry = {"name":name, "core_wallet":"c_"+name, "pubkey":pubkey}
+        ensure_watch_wallet(entry)
+        registry["wallets"].append(entry)
+        save_registry(registry)
+        return source_info(entry)
+
+def btc_to_sat(value):
+    amount = Decimal(str(value)); sat = amount * Decimal(100_000_000)
+    if amount <= 0 or sat != sat.to_integral_value():
+        raise ValueError("Amount must be positive with at most 8 decimals")
+    return int(sat)
+
+def cold_status():
+    sources=[]
+    for entry in load_registry()["wallets"]:
+        try:
+            if entry["core_wallet"] not in wallet_names(): cli("loadwallet", entry["core_wallet"])
+            sources.append(source_info(entry))
+        except Exception as e:
+            sources.append({"name":entry.get("name","?"), "balance":"error",
+                            "address":"", "pubkey":entry.get("pubkey",""),
+                            "private_keys_enabled":True, "error":str(e)})
+    try:
+        with open(COLD_LAST_FILE) as f: last=json.load(f)
+    except Exception: last={}
+    confirmations=0
+    if last.get("txid"):
+        try: confirmations=cli("getrawtransaction",last["txid"],"true").get("confirmations",0)
+        except Exception: pass
+    return {"sources":sources, "last_tx":last.get("txid",""),
+            "last_source":last.get("source",""), "confirmations":confirmations}
+
+def create_unsigned_psbt(source_name, address, amount_value):
+    valid = cli("validateaddress", address)
+    if (not valid.get("isvalid") or not address.startswith("bcrt1q") or
+            valid.get("witness_version") != 0 or
+            len(valid.get("witness_program", "")) != 40):
+        raise ValueError("Receiver must be a Regtest native P2WPKH address")
+    amount_sat=btc_to_sat(amount_value)
+    with COLD_LOCK:
+        entry=find_source(source_name); source=source_info(entry)
+        if address == source["address"]: raise ValueError("Receiver must differ from source")
+        utxos=cli("-rpcwallet="+entry["core_wallet"],"listunspent","1","9999999")
+        choices=[]
+        for u in utxos:
+            sat=btc_to_sat(u["amount"])
+            if sat >= amount_sat + COLD_FEE_SAT: choices.append((sat,u))
+        if not choices: raise ValueError("No single confirmed MCU UTXO covers amount + fee")
+        input_sat,utxo=min(choices,key=lambda x:x[0])
+        change_sat=input_sat-amount_sat-COLD_FEE_SAT; fee_sat=COLD_FEE_SAT
+        outputs={address:format(Decimal(amount_sat)/Decimal(100_000_000),".8f")}
+        if change_sat >= 546:
+            outputs[source["address"]]=format(Decimal(change_sat)/Decimal(100_000_000),".8f")
+        else: fee_sat += change_sat
+        inputs=[{"txid":utxo["txid"],"vout":utxo["vout"],"sequence":4294967293}]
+        psbt=cli("createpsbt",json.dumps(inputs),json.dumps(outputs))
+        psbt=cli("utxoupdatepsbt",psbt,json.dumps([source["descriptor"]]))
+        cli("decodepsbt",psbt)
+        return {"psbt":psbt,"filename":f"unsigned-{source_name}.psbt",
+                "source":source_name,"source_address":source["address"],
+                "amount_sat":amount_sat,"input_sat":input_sat,"fee_sat":fee_sat}
+
+def broadcast_signed_psbt(source_name, psbt):
+    global COLD_LAST_FILE
+    if not isinstance(psbt,str) or len(psbt)<20 or len(psbt)>MAX_BODY:
+        raise ValueError("Invalid signed PSBT data")
+    find_source(source_name)
+    cli("decodepsbt",psbt)
+    finalized=cli("finalizepsbt",psbt)
+    if not finalized.get("complete") or not finalized.get("hex"):
+        raise ValueError("PSBT is not fully signed; MCU signature is missing or invalid")
+    raw=finalized["hex"]
+    check=cli("testmempoolaccept",json.dumps([raw]))[0]
+    if not check.get("allowed"):
+        raise ValueError("Bitcoin Core rejected transaction: "+check.get("reject-reason","unknown"))
+    txid=cli("sendrawtransaction",raw)
+    with open(COLD_LAST_FILE,"w") as f:
+        json.dump({"txid":txid,"source":source_name,"transport":"signed-psbt-file"},f)
+    return {"txid":txid,"complete":True,"mempool_allowed":True}
+
+def cold_mine(source_name,count_value):
+    count=int(count_value)
+    if count<1 or count>1000: raise ValueError("Count must be 1..1000")
+    source=source_info(find_source(source_name))
+    return {"blocks":cli("generatetoaddress",str(count),source["address"])}
+
+def body(h):
+    n=int(h.headers.get("Content-Length","0"))
+    if n<0 or n>MAX_BODY: raise ValueError("Request body too large")
+    return json.loads(h.rfile.read(n) or b"{}")
+
+class Handler(BaseHTTPRequestHandler):
+    def send_json(self,data,code=200):
+        raw=json.dumps(data).encode();self.send_response(code);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(raw)));self.send_header("Cache-Control","no-store");self.end_headers();self.wfile.write(raw)
+    def do_GET(self):
+        try:
+            if self.path=="/":
+                raw=PAGE.encode();self.send_response(200);self.send_header("Content-Type","text/html; charset=utf-8");self.send_header("Content-Length",str(len(raw)));self.end_headers();self.wfile.write(raw);return
+            if self.path=="/api/status":
+                info=cli("getblockchaininfo");self.send_json({"chain":info["chain"],"blocks":info["blocks"],"mempool_count":len(cli("getrawmempool")),"wallets":wallet_status(),"cold":cold_status()});return
+            self.send_error(404)
+        except Exception as e:self.send_json({"error":str(e)},503)
+    def do_POST(self):
+        try:
+            d=body(self)
+            if self.path=="/api/wallet":
+                name=str(d.get("name","")).strip()
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",name):raise ValueError("Invalid wallet name")
+                ensure_wallet(name);self.send_json({"ok":True,"name":name});return
+            if self.path=="/api/address":
+                name=str(d.get("wallet","")).strip();info=cli("-rpcwallet="+name,"getwalletinfo")
+                if not info.get("private_keys_enabled"):raise ValueError("Watch-only wallet cannot create address")
+                self.send_json({"address":fixed_receive_address(name,True),"fixed":True});return
+            if self.path=="/api/mcu/register":
+                self.send_json(register_source(str(d.get("name","")).strip(),str(d.get("pubkey","")).strip()));return
+            if self.path=="/api/psbt/create":
+                self.send_json(create_unsigned_psbt(str(d.get("source","")).strip(),str(d.get("address","")).strip(),d.get("amount","0")));return
+            if self.path=="/api/psbt/broadcast":
+                self.send_json(broadcast_signed_psbt(str(d.get("source","")).strip(),d.get("psbt","")));return
+            if self.path=="/api/cold/mine":
+                self.send_json(cold_mine(str(d.get("source","")).strip(),d.get("count",1)));return
+            self.send_error(404)
+        except Exception as e:self.send_json({"error":str(e)},400)
+    def log_message(self,fmt,*args):print(fmt%args,flush=True)
+
+if __name__=="__main__":
+    print("MCU air-gap wallet web listening on http://127.0.0.1:8787",flush=True)
+    ThreadingHTTPServer(("127.0.0.1",8787),Handler).serve_forever()

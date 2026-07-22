@@ -1,0 +1,181 @@
+# C P2WPKH Cold-Signer Reference
+
+Đây là reference model C phục vụ Regtest và chuyển đổi sang Verilog. Binary C
+thực hiện phần ký; Bitcoin Core chỉ giữ descriptor watch-only và broadcast raw
+transaction đã ký.
+
+> Không dùng implementation này với mainnet. Phép toán affine
+> double-and-add và BIGNUM không constant-time, chưa chống side-channel,
+> fault-injection hoặc key extraction.
+
+## Cấu trúc
+
+```text
+c-signer/
+├── src/coldsign.c       # Thuật toán và transaction serializer
+├── bin/coldsign         # Binary
+├── keys/cold.key        # Private key 256-bit, mode 0600
+├── tests/selftest.txt   # Test vector ECDSA deterministic
+├── tests/e2e-sign.txt   # Raw transaction và kết quả end-to-end
+├── Makefile
+└── README.md
+```
+
+Private key không được import vào Bitcoin Core. Wallet `coldwatch` có:
+
+```text
+private_keys_enabled: false
+```
+
+## Build và self-test
+
+```bash
+cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+make
+make test
+```
+
+Kết quả bắt buộc:
+
+```text
+SELFTEST_OK
+```
+
+## Các lệnh
+
+Tạo private key mới:
+
+```bash
+bin/coldsign keygen keys/example.key
+```
+
+Lấy compressed public key, HASH160 và P2WPKH scriptPubKey:
+
+```bash
+bin/coldsign info keys/cold.key
+```
+
+Ký trực tiếp digest 32 byte:
+
+```bash
+bin/coldsign sign-digest keys/cold.key DIGEST_HEX
+```
+
+Tính BIP143 sighash:
+
+```bash
+bin/coldsign sighash-p2wpkh \
+  keys/cold.key UNSIGNED_TRANSACTION_HEX PREVOUT_AMOUNT_SAT
+```
+
+Ký và đóng gói SegWit witness:
+
+```bash
+bin/coldsign sign-p2wpkh \
+  keys/cold.key UNSIGNED_TRANSACTION_HEX PREVOUT_AMOUNT_SAT
+```
+
+Output cuối là signed raw transaction hex, dùng được với:
+
+```bash
+bitcoin-cli -regtest testmempoolaccept '["SIGNED_HEX"]'
+bitcoin-cli -regtest sendrawtransaction "SIGNED_HEX"
+```
+
+## Luồng web
+
+```text
+Browser
+  │ receiver + amount
+  ▼
+Python web API
+  │ listunspent từ coldwatch (watch-only)
+  │ createrawtransaction
+  ▼
+coldsign sighash-p2wpkh
+  │ BIP143 double-SHA256
+  ▼
+coldsign sign-p2wpkh
+  │ RFC6979 nonce
+  │ ECDSA secp256k1
+  │ low-S
+  │ DER + SIGHASH_ALL
+  │ SegWit witness
+  ▼
+Bitcoin Core testmempoolaccept
+  │ sendrawtransaction
+  ▼
+Regtest mempool/block
+```
+
+Endpoint web:
+
+```text
+POST /api/cold/send
+{"address":"bcrt1...","amount":"0.01"}
+```
+
+## Ánh xạ sang Verilog
+
+Nên tách theo các module sau:
+
+1. `tx_parser`
+   - Đọc version, outpoint, sequence, outputs và locktime.
+   - Bản C hiện giới hạn đúng một input.
+
+2. `bip143_preimage`
+   - `hashPrevouts`
+   - `hashSequence`
+   - `hashOutputs`
+   - Ghép scriptCode, amount, locktime và `SIGHASH_ALL`.
+
+3. `sha256d`
+   - Hai vòng SHA-256.
+   - Có thể dùng chung cho ba hash thành phần và final sighash.
+
+4. `rfc6979_hmac_sha256`
+   - Sinh deterministic nonce `k` từ private key và sighash.
+   - Không phụ thuộc RNG tại thời điểm ký.
+
+5. `secp256k1_scalar`
+   - Modulo order:
+     `n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141`
+   - Tính `r`, `s`, modular inverse và low-S.
+
+6. `secp256k1_point_mul`
+   - Curve:
+     `y² = x³ + 7 mod p`
+   - Field:
+     `p = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F`
+   - Reference C dùng affine double-and-add; RTL production nên dùng
+     projective/Jacobian để giảm modular inverse.
+
+7. `der_encoder`
+   - ASN.1 DER cho `r` và `s`.
+   - Thêm byte `01` cho `SIGHASH_ALL`.
+
+8. `witness_serializer`
+   - Marker/flag `0001`
+   - Witness stack `[DER_SIGNATURE+01, COMPRESSED_PUBKEY]`.
+
+## Giới hạn hiện tại
+
+- Chỉ native P2WPKH input (`bcrt1q...`).
+- Chính xác một input.
+- Hỗ trợ nhiều output.
+- Chỉ `SIGHASH_ALL`.
+- Fee do web đặt cố định `1000 sat`.
+- Chưa hỗ trợ PSBT, multisig, Taproot/Schnorr hoặc hardware handshake.
+- Web/TryCloudflare hiện dùng cho Regtest và chưa có authentication mạnh.
+
+## Test end-to-end đã đạt
+
+- C signer address:
+  `bcrt1qww4fdw8ymnf7ps9ng5q2adsmll742lua7eyucw`
+- Bitcoin Core watch-only wallet: `coldwatch`
+- Giao dịch C ký trực tiếp:
+  `8d45523ae3383f4e6a4deb3ce00956db00f15a8ffe761b8909058140a660e233`
+- Giao dịch ký qua web:
+  `41a8ac795268645847e7247e163e0c852d31a2299e05462f84219c655434a139`
+- `testmempoolaccept`: `allowed: true`
+

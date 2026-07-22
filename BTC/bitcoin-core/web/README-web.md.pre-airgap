@@ -1,0 +1,79 @@
+# Bitcoin Regtest C PSBT Signer Web
+
+Web chỉ có một đường ký và gửi giao dịch:
+
+```text
+Bitcoin Core tạo PSBT chưa ký
+  → C-signer đọc, kiểm tra và đóng băng
+  → người dùng xem và xác nhận
+  → C-signer băm, ký, tự kiểm tra và chèn chữ ký
+  → Bitcoin Core hoàn thiện, kiểm tra và phát
+```
+
+## Cách sử dụng
+
+1. Trong **Wallet management**, tạo hoặc load ví nhận tiền nếu cần.
+2. Trong **Fixed receiving address**, lấy địa chỉ cố định và tự điền nó vào ô
+   người nhận.
+3. Trong **C-signer source wallets**, chọn hoặc tạo ví nguồn C-signer.
+4. Nhập địa chỉ nhận và số Bitcoin.
+5. Nhấn **1. Tạo và kiểm tra PSBT**.
+6. Kiểm tra mạng, nguồn, địa chỉ nhận, số tiền, phí, tiền thừa, mã đóng băng và
+   PSBT chưa ký do C-signer trả về.
+7. Đánh dấu ô xác nhận rồi nhấn
+   **2. Xác nhận → C ký → Hoàn thiện → Phát**.
+8. Đào một block nếu muốn giao dịch Regtest có một lần xác nhận.
+
+PSBT chờ xác nhận hết hạn sau 10 phút. Nút **Hủy PSBT** xóa yêu cầu đang chờ
+và không tạo chữ ký.
+
+## API
+
+```text
+GET  /api/status
+POST /api/wallet
+POST /api/address
+POST /api/cold/wallet
+POST /api/cold/prepare
+POST /api/cold/confirm
+POST /api/cold/cancel
+POST /api/cold/mine
+```
+
+Tạo và kiểm tra PSBT:
+
+```json
+{"source":"coldwatch","address":"bcrt1...","amount":"0.01"}
+```
+
+Gửi đến `/api/cold/prepare`. Kết quả có `pending_id`, `freeze_id`, nội dung
+PSBT và bản phân tích từ C. Sau khi người dùng kiểm tra, gửi đến
+`/api/cold/confirm`:
+
+```json
+{
+  "pending_id": "...",
+  "freeze_id": "...",
+  "approved": true
+}
+```
+
+## Lưu khóa
+
+Khóa C-signer nằm tại:
+
+```text
+~/workspace/dinhanh_k68/bitcoin-core/c-signer/keys/SOURCE_NAME.key
+```
+
+Các tệp khóa có quyền `0600`. Bitcoin Core chỉ có descriptor/khóa công khai
+trong ví chỉ theo dõi `c_SOURCE_NAME`; Core không ký giao dịch này.
+
+## Tiến trình
+
+- Web: `127.0.0.1:8787`, tmux `btc:dashboard`.
+- TryCloudflare: tmux `btc:tunnel`.
+- Bitcoin Core: tmux `btc:bitcoin`.
+- Biên dịch C-signer: tmux `btc:c-signer-build`.
+
+Đây là hệ thống Regtest phục vụ nghiên cứu C/Verilog, không dùng với Mainnet.

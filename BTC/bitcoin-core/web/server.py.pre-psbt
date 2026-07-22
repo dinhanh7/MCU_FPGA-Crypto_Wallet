@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+import json, os, re, subprocess, threading
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BASE = os.path.expanduser("~/workspace/dinhanh_k68/bitcoin-core")
+CLI = os.path.join(BASE, "bin", "bitcoin-cli")
+DATA = os.path.join(BASE, "data")
+LOG = os.path.join(BASE, "tools", "test.log")
+SIGNER = os.path.join(BASE, "c-signer", "bin", "coldsign")
+SIGNER_KEY = os.path.join(BASE, "c-signer", "keys", "cold.key")
+COLD_WALLET = "coldwatch"
+COLD_KEYS_DIR = os.path.join(BASE, "c-signer", "keys")
+COLD_REGISTRY = os.path.join(BASE, "c-signer", "wallets.json")
+COLD_FEE_SAT = 1000
+COLD_LOCK = threading.Lock()
+COLD_LAST_TX = ""
+COLD_LAST_FILE = os.path.join(BASE, "c-signer", "tests", "last-web-tx.json")
+
+PAGE = r"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bitcoin C Cold Signer</title>
+<style>
+:root{color-scheme:dark;--bg:#09111f;--panel:#121e31;--line:#2b405d;--orange:#f7931a;--muted:#9db0c8;--green:#58d68d;--red:#ff7373}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#09111f,#192941);font:15px system-ui,sans-serif;color:#eef5ff}main{max-width:1000px;margin:auto;padding:28px 16px}h1{color:var(--orange);margin:0}.sub,.hint,.foot{color:var(--muted)}.sub{margin:5px 0 20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.card{background:#121e31ef;border:1px solid var(--line);border-radius:13px;padding:18px;margin-top:14px}.value{font-size:25px;font-weight:700;margin-top:7px}.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.btc{color:var(--orange)}.ok{color:var(--green)}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.field{display:flex;flex-direction:column;gap:5px;flex:1;min-width:190px}input,select{background:#0a1526;color:#eef5ff;border:1px solid var(--line);border-radius:7px;padding:11px}button{background:var(--orange);border:0;border-radius:7px;padding:11px 15px;font-weight:700;cursor:pointer}button.secondary{background:#29415e;color:#fff}.address{font-size:12px;word-break:break-all;color:#ffd49c;margin:7px 0}.wallets{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:14px}.wallet{border:1px solid var(--line);border-radius:10px;padding:13px}.status{min-height:24px;margin-top:12px;color:var(--green)}.error{color:var(--red)}table{width:100%;border-collapse:collapse}td,th{text-align:left;border-bottom:1px solid var(--line);padding:9px}th{color:var(--muted);font-weight:500}code{word-break:break-all;color:#ffd49c}
+</style></head><body><main>
+<h1>₿ Bitcoin Regtest C Cold Signer</h1><div class="sub">Luồng ký duy nhất: C signer · Bitcoin Core watch-only · <button class="secondary" onclick="refresh()">Refresh</button></div>
+<div class="grid"><div class="card"><div class="label">Network</div><div id="chain" class="value">—</div></div><div class="card"><div class="label">Block height</div><div id="blocks" class="value">—</div></div><div class="card"><div class="label">Mempool</div><div id="mempool" class="value">—</div></div></div>
+<section class="card"><h2>Wallet management <span class="hint">(receive only)</span></h2><div class="row"><div class="field"><label>Wallet name</label><input id="newwallet" placeholder="alice"></div><button onclick="createWallet()">Create / Load wallet</button></div><div id="wallets" class="wallets"></div><p class="hint">Web cho phép tạo/load và nhận coin, nhưng không có API gửi hoặc ký bằng các wallet này.</p></section>
+<section class="card"><h2>Fixed receiving address</h2><div class="row"><div class="field"><label>Wallet</label><select id="addresswallet"></select></div><button onclick="fixedAddress()">Get fixed address</button></div><div id="newaddress" class="address"></div><p class="hint">Lần đầu sẽ tạo địa chỉ label <code>web-fixed</code>; các lần sau luôn trả về cùng địa chỉ.</p></section>
+<section class="card"><h2>C-signer source wallets</h2><div class="row"><div class="field"><label>New source wallet name</label><input id="newcoldwallet" placeholder="treasury"></div><button onclick="createColdWallet()">Create C-signer wallet</button></div><div id="coldsources" class="wallets"></div><p class="hint">Mỗi source có private key C riêng (mode 0600) và một Bitcoin Core watch-only wallet tương ứng. Private key không được trả qua web.</p></section>
+<section class="card"><h2>Sign and send</h2><div class="row"><div class="field"><label>From C-signer wallet</label><select id="coldsource"></select></div><div class="field"><label>Receiver Regtest address</label><input id="coldreceiver" placeholder="bcrt1..."></div><div class="field"><label>Amount (BTC)</label><input id="coldamount" type="number" min="0.00000001" step="0.00000001" placeholder="0.1"></div><button onclick="coldSend()">Build → C sign → Broadcast</button></div><table><tr><th>Source</th><td id="coldlastsource">—</td></tr><tr><th>Last TXID</th><td><code id="coldtx">—</code></td></tr><tr><th>Sighash</th><td><code id="coldsighash">—</code></td></tr><tr><th>Confirmations</th><td id="coldconf">—</td></tr></table></section>
+<section class="card"><h2>Mine directly to C signer</h2><div class="row"><div class="field"><label>Destination C-signer wallet</label><select id="minesource"></select></div><div class="field"><label>Number of blocks</label><input id="minecount" type="number" min="1" max="1000" value="1"></div><button onclick="mineCold()">Mine</button></div><p class="hint">Đào 1 block để xác nhận giao dịch. Đào 101 block khi cần tạo coinbase đã đủ maturity. Mining không tạo chữ ký giao dịch.</p></section>
+<p id="status" class="status"></p><p class="foot">Regtest only. Wallet thường chỉ dùng quản lý/nhận coin; mọi thao tác ký và gửi đều bắt buộc qua C signer. Bitcoin RPC chỉ bind localhost.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+async function api(path, opts={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});const d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');return d}
+function msg(s,bad=false){$('status').textContent=s;$('status').className=bad?'status error':'status'}
+function setWallets(ws){const usable=ws.filter(w=>w.private_keys_enabled);const s=$('addresswallet'),old=s.value;s.innerHTML=usable.map(w=>'<option>'+w.name+'</option>').join('');if(usable.some(w=>w.name===old))s.value=old;$('wallets').innerHTML=ws.map(w=>'<div class="wallet"><b>'+w.name+'</b><div class="value btc">'+w.balance+' BTC</div><div class="address">'+(w.fixed_address||'fixed address not created')+'</div><div class="hint">'+(w.private_keys_enabled?'receive wallet':'watch-only')+'</div></div>').join('')}
+function setColdSources(c){const ss=c.sources||[];for(const id of ['coldsource','minesource']){const e=$(id),old=e.value;e.innerHTML=ss.map(s=>'<option value="'+s.name+'">'+s.name+' ('+s.balance+' BTC)</option>').join('');if(ss.some(s=>s.name===old))e.value=old}$('coldsources').innerHTML=ss.map(s=>'<div class="wallet"><b>'+s.name+'</b><div class="value btc">'+s.balance+' BTC</div><div class="address">'+s.address+'</div><div class="address">pubkey: '+s.pubkey+'</div><div class="hint">Core key: '+(s.private_keys_enabled?'ERROR':'disabled ✓')+'</div></div>').join('')}
+async function refresh(){try{const d=await api('/api/status'),c=d.cold||{};$('chain').textContent=d.chain;$('blocks').textContent=d.blocks;$('mempool').textContent=d.mempool_count;$('coldtx').textContent=c.last_tx||'—';$('coldsighash').textContent=c.last_sighash||'—';$('coldconf').textContent=c.confirmations??0;$('coldlastsource').textContent=c.last_source||'—';setWallets(d.wallets||[]);setColdSources(c);msg('Updated '+new Date().toLocaleTimeString())}catch(e){msg(e.message,true)}}
+async function createWallet(){try{const name=$('newwallet').value.trim();if(!name)throw Error('Enter wallet name');await api('/api/wallet',{method:'POST',body:JSON.stringify({name})});$('newwallet').value='';await refresh();msg('Wallet ready: '+name)}catch(e){msg(e.message,true)}}
+async function fixedAddress(){try{const wallet=$('addresswallet').value;if(!wallet)throw Error('No receive wallet available');const d=await api('/api/address',{method:'POST',body:JSON.stringify({wallet})});$('newaddress').textContent=d.address;$('coldreceiver').value=d.address;await refresh();msg('Fixed address returned and copied into C signer receiver field')}catch(e){msg(e.message,true)}}
+async function createColdWallet(){try{const name=$('newcoldwallet').value.trim();if(!name)throw Error('Enter source wallet name');await api('/api/cold/wallet',{method:'POST',body:JSON.stringify({name})});$('newcoldwallet').value='';await refresh();msg('C-signer source ready: '+name)}catch(e){msg(e.message,true)}}
+async function coldSend(){try{const source=$('coldsource').value;if(!source)throw Error('No C-signer source wallet');if(!confirm('Cho phép C signer '+source+' ký giao dịch Regtest này?'))return;const d=await api('/api/cold/send',{method:'POST',body:JSON.stringify({source,address:$('coldreceiver').value.trim(),amount:$('coldamount').value})});$('coldtx').textContent=d.txid;$('coldsighash').textContent=d.sighash;msg('Đã ký bằng C source '+source+' và broadcast. Đào 1 block để xác nhận.');await refresh()}catch(e){msg(e.message,true)}}
+async function mineCold(){try{const source=$('minesource').value;if(!source)throw Error('No C-signer destination wallet');const d=await api('/api/cold/mine',{method:'POST',body:JSON.stringify({source,count:$('minecount').value})});msg('Đã đào '+d.blocks.length+' block vào C-signer wallet '+source);await refresh()}catch(e){msg(e.message,true)}}
+refresh();setInterval(refresh,5000)
+</script></body></html>"""
+
+def cli(*args):
+    p = subprocess.run([CLI, f"-datadir={DATA}", "-regtest", *args], capture_output=True, text=True, timeout=12)
+    if p.returncode: raise RuntimeError(p.stderr.strip() or "bitcoin-cli failed")
+    return json.loads(p.stdout) if p.stdout.strip().startswith(("{", "[", chr(34))) else p.stdout.strip()
+
+def wallet_names():
+    return cli("listwallets")
+
+def ensure_wallet(name):
+    if name not in wallet_names():
+        try:
+            cli("loadwallet", name)
+        except Exception:
+            cli("createwallet", name)
+
+def fixed_receive_address(name, create=False):
+    try:
+        addresses = cli("-rpcwallet="+name, "getaddressesbylabel", "web-fixed")
+        if isinstance(addresses, dict) and addresses:
+            return sorted(addresses.keys())[0]
+    except Exception:
+        pass
+    if create:
+        return cli("-rpcwallet="+name, "getnewaddress", "web-fixed")
+    return ""
+
+def wallet_status():
+    result = []
+    for name in wallet_names():
+        try:
+            info = cli("-rpcwallet="+name, "getwalletinfo")
+            result.append({
+                "name":name,
+                "balance":cli("-rpcwallet="+name, "getbalance"),
+                "private_keys_enabled":info.get("private_keys_enabled", False),
+                "fixed_address":fixed_receive_address(name, False)
+                    if info.get("private_keys_enabled") else "",
+            })
+        except Exception:
+            pass
+    return result
+
+def run_signer(*args):
+    p = subprocess.run([SIGNER, *args], capture_output=True, text=True, timeout=30)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip() or "C signer failed")
+    return p.stdout.strip()
+
+def load_cold_registry():
+    try:
+        with open(COLD_REGISTRY) as f:
+            data = json.load(f)
+        if isinstance(data.get("wallets"), list):
+            return data
+    except Exception:
+        pass
+    return {"wallets":[{"name":"coldwatch","core_wallet":"coldwatch",
+                        "key_file":"cold.key"}]}
+
+def save_cold_registry(data):
+    tmp = COLD_REGISTRY + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, COLD_REGISTRY)
+
+def find_cold_source(name):
+    for entry in load_cold_registry()["wallets"]:
+        if entry["name"] == name:
+            return entry
+    raise ValueError("Unknown C-signer source wallet")
+
+def cold_key_path(entry):
+    return os.path.join(COLD_KEYS_DIR, entry["key_file"])
+
+def cold_source_info(entry):
+    signer_info = json.loads(run_signer("info", cold_key_path(entry)))
+    descriptor = cli("getdescriptorinfo",
+                     f"wpkh({signer_info['pubkey']})")["descriptor"]
+    address = cli("deriveaddresses", descriptor)[0]
+    core_info = cli("-rpcwallet="+entry["core_wallet"], "getwalletinfo")
+    return {
+        "name":entry["name"],
+        "core_wallet":entry["core_wallet"],
+        "address":address,
+        "pubkey":signer_info["pubkey"],
+        "balance":cli("-rpcwallet="+entry["core_wallet"], "getbalance"),
+        "private_keys_enabled":core_info.get("private_keys_enabled"),
+        "descriptor":descriptor,
+    }
+
+def ensure_cold_core_wallet(entry):
+    core = entry["core_wallet"]
+    if core not in wallet_names():
+        try:
+            cli("loadwallet", core)
+        except Exception:
+            cli("-named", "createwallet", "wallet_name="+core,
+                "disable_private_keys=true", "blank=true",
+                "descriptors=true", "load_on_startup=true")
+    signer_info = json.loads(run_signer("info", cold_key_path(entry)))
+    descriptor = cli("getdescriptorinfo",
+                     f"wpkh({signer_info['pubkey']})")["descriptor"]
+    info = cli("-rpcwallet="+core, "getwalletinfo")
+    if info.get("private_keys_enabled"):
+        raise ValueError("Core wallet name collision with a private-key wallet")
+    cli("-rpcwallet="+core, "importdescriptors",
+        json.dumps([{"desc":descriptor, "timestamp":0}]))
+
+def create_cold_source(name):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,48}", name):
+        raise ValueError("Invalid C-signer wallet name")
+    with COLD_LOCK:
+        registry = load_cold_registry()
+        if any(w["name"] == name for w in registry["wallets"]):
+            entry = find_cold_source(name)
+            ensure_cold_core_wallet(entry)
+            return cold_source_info(entry)
+        key_file = name + ".key"
+        key_path = os.path.join(COLD_KEYS_DIR, key_file)
+        if os.path.exists(key_path):
+            raise ValueError("Key file already exists but is not registered")
+        entry = {"name":name, "core_wallet":"c_"+name,
+                 "key_file":key_file}
+        run_signer("keygen", key_path)
+        ensure_cold_core_wallet(entry)
+        registry["wallets"].append(entry)
+        save_cold_registry(registry)
+        return cold_source_info(entry)
+
+def btc_to_sat(value):
+    amount = Decimal(str(value))
+    sat_decimal = amount * Decimal(100_000_000)
+    if amount <= 0 or sat_decimal != sat_decimal.to_integral_value():
+        raise ValueError("Amount must be positive with at most 8 decimals")
+    return int(sat_decimal)
+
+def cold_status():
+    sources = []
+    for entry in load_cold_registry()["wallets"]:
+        try:
+            if entry["core_wallet"] not in wallet_names():
+                cli("loadwallet", entry["core_wallet"])
+            sources.append(cold_source_info(entry))
+        except Exception as e:
+            sources.append({"name":entry["name"], "balance":"error",
+                            "address":"", "pubkey":"",
+                            "private_keys_enabled":True, "error":str(e)})
+    last = {}
+    try:
+        with open(COLD_LAST_FILE) as f:
+            last = json.load(f)
+    except Exception:
+        pass
+    confirmations = 0
+    if last.get("txid"):
+        last_source = last.get("source", "coldwatch")
+        try:
+            entry = find_cold_source(last_source)
+            confirmations = cli("-rpcwallet="+entry["core_wallet"],
+                                "gettransaction", last["txid"]).get("confirmations", 0)
+        except Exception:
+            try:
+                confirmations = cli("getrawtransaction", last["txid"], "true").get("confirmations", 0)
+            except Exception:
+                pass
+    return {
+        "sources":sources,
+        "last_tx": last.get("txid", COLD_LAST_TX),
+        "last_sighash": last.get("sighash", ""),
+        "last_source":last.get("source", ""),
+        "confirmations": confirmations,
+    }
+
+def cold_send(source_name, address, amount_value):
+    global COLD_LAST_TX
+    if not re.fullmatch(r"bcrt1[0-9a-z]{20,90}", address):
+        raise ValueError("Regtest address must start with bcrt1")
+    amount_sat = btc_to_sat(amount_value)
+    with COLD_LOCK:
+        entry = find_cold_source(source_name)
+        source = cold_source_info(entry)
+        key_path = cold_key_path(entry)
+        utxos = cli("-rpcwallet="+entry["core_wallet"],
+                    "listunspent", "1", "9999999")
+        choices = []
+        for u in utxos:
+            sat = btc_to_sat(u["amount"])
+            if sat >= amount_sat + COLD_FEE_SAT:
+                choices.append((sat, u))
+        if not choices:
+            raise ValueError("No single confirmed C-signer UTXO can cover amount + fee")
+        utxo_sat, utxo = min(choices, key=lambda x: x[0])
+        change_sat = utxo_sat - amount_sat - COLD_FEE_SAT
+        outputs = {address: float(Decimal(amount_sat) / Decimal(100_000_000))}
+        fee_sat = COLD_FEE_SAT
+        if change_sat >= 546:
+            outputs[source["address"]] = float(Decimal(change_sat) / Decimal(100_000_000))
+        else:
+            fee_sat += change_sat
+        inputs = [{"txid":utxo["txid"], "vout":utxo["vout"], "sequence":4294967293}]
+        unsigned = cli("createrawtransaction", json.dumps(inputs), json.dumps(outputs))
+        sighash = run_signer("sighash-p2wpkh", key_path, unsigned, str(utxo_sat))
+        signed = run_signer("sign-p2wpkh", key_path, unsigned, str(utxo_sat))
+        check = cli("testmempoolaccept", json.dumps([signed]))[0]
+        if not check.get("allowed"):
+            raise RuntimeError("Rejected: "+check.get("reject-reason", "unknown"))
+        txid = cli("sendrawtransaction", signed)
+        COLD_LAST_TX = txid
+        with open(COLD_LAST_FILE, "w") as f:
+            json.dump({"txid":txid, "sighash":sighash,
+                       "source":source_name}, f)
+        return {"txid":txid, "sighash":sighash, "fee_sat":fee_sat,
+                "input_sat":utxo_sat, "amount_sat":amount_sat,
+                "source":source_name}
+
+def cold_mine(source_name, count_value):
+    count = int(count_value)
+    if count < 1 or count > 1000:
+        raise ValueError("Count must be 1..1000")
+    source = cold_source_info(find_cold_source(source_name))
+    return {"blocks":cli("generatetoaddress", str(count), source["address"]),
+            "source":source_name}
+
+def body(h):
+    n=int(h.headers.get("Content-Length","0")); return json.loads(h.rfile.read(n) or b"{}")
+
+class Handler(BaseHTTPRequestHandler):
+    def send_json(self, data, code=200):
+        raw=json.dumps(data).encode(); self.send_response(code); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(raw))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(raw)
+    def do_GET(self):
+        try:
+            if self.path=="/": raw=PAGE.encode(); self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+            if self.path=="/api/status":
+                info=cli("getblockchaininfo")
+                self.send_json({"chain":info["chain"],"blocks":info["blocks"],
+                                "mempool_count":len(cli("getrawmempool")),
+                                "wallets":wallet_status(),
+                                "cold":cold_status()}); return
+            self.send_error(404)
+        except Exception as e: self.send_json({"error":str(e)},503)
+    def do_POST(self):
+        try:
+            d=body(self)
+            if self.path=="/api/wallet":
+                name=str(d.get("name","")).strip()
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",name):
+                    raise ValueError("Invalid wallet name")
+                ensure_wallet(name)
+                self.send_json({"ok":True,"name":name}); return
+            if self.path=="/api/address":
+                name=str(d.get("wallet","")).strip()
+                if name not in wallet_names():
+                    raise ValueError("Wallet is not loaded")
+                info=cli("-rpcwallet="+name, "getwalletinfo")
+                if not info.get("private_keys_enabled"):
+                    raise ValueError("Watch-only wallet cannot create receiving addresses")
+                self.send_json({"address":fixed_receive_address(name, True),
+                                "fixed":True}); return
+            if self.path=="/api/cold/wallet":
+                name=str(d.get("name","")).strip()
+                self.send_json(create_cold_source(name)); return
+            if self.path=="/api/cold/send":
+                self.send_json(cold_send(str(d.get("source","")).strip(),
+                                         str(d.get("address","")).strip(),
+                                         d.get("amount","0"))); return
+            if self.path=="/api/cold/mine":
+                self.send_json(cold_mine(str(d.get("source","")).strip(),
+                                         d.get("count",1))); return
+            self.send_error(404)
+        except Exception as e: self.send_json({"error":str(e)},400)
+    def log_message(self,fmt,*args): print(fmt%args,flush=True)
+
+if __name__=="__main__":
+    print("Wallet dashboard listening on http://127.0.0.1:8787",flush=True)
+    ThreadingHTTPServer(("127.0.0.1",8787),Handler).serve_forever()

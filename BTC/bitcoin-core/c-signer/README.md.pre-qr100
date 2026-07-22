@@ -1,0 +1,120 @@
+# MCU C-signer – ví lạnh PSBT qua QR
+
+`coldsign` mô phỏng phần mềm MCU ví lạnh. Máy trực tuyến và MCU trao đổi PSBT
+hai chiều bằng QR thích nghi: PSBT nhỏ dùng một QR tĩnh, PSBT lớn dùng BBQr
+động nhiều khung. Web không có khóa bí mật và không có API ký.
+
+> Đây là mô hình nghiên cứu Regtest. Terminal mô phỏng keypad/nút bấm, đầu đọc
+> QR đưa chuỗi đã giải mã vào stdin và trang HTML/SVG mô phỏng LCD MCU. Không
+> dùng mã này với Mainnet.
+
+## Luồng QR
+
+```text
+Web + Bitcoin Core tạo PSBT chưa ký
+  ↓ QR tĩnh hoặc BBQr động
+MCU ráp đủ khung → giải nén PSBT → kiểm tra → freeze_id
+  ↓ passkey + DONG Y
+BIP143 → RFC6979 → ECDSA → low-S/DER → tự kiểm tra
+  ↓
+MCU ghép chữ ký và tự chọn QR tĩnh/động cho signed PSBT
+  ↓ webcam
+Web đọc signed PSBT → finalizepsbt → testmempoolaccept → sendrawtransaction
+```
+
+BBQr là định dạng công khai của Coinkite dành cho dữ liệu Bitcoin lớn qua QR:
+https://github.com/coinkite/BBQr
+
+Thiết lập hiện tại dùng:
+
+```text
+Encoding: Z (raw DEFLATE wbits=10 + Base32 RFC4648)
+File type: P (PSBT)
+Header: B$ZP + tổng khung base36 + chỉ số khung base36
+PSBT vừa trong 600 ký tự: một QR tĩnh B$ZP0100
+PSBT lớn: chia đều payload thành các khung 360 ký tự và chạy động 500 ms
+Khung có thể được quét không đúng thứ tự
+```
+
+## Biên dịch
+
+```bash
+cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+make clean all test
+```
+
+`SELFTEST_OK` là kết quả bắt buộc. QR được tạo bằng bản C của thư viện Nayuki
+QR Code Generator trong `src/qrcodegen.c`/`.h`.
+
+## Thiết lập mã mở khóa
+
+```bash
+bin/coldsign mcu-setup-passkey keys/mcu.passkey
+```
+
+Mã gồm 6–12 chữ số. Tệp lưu salt và PBKDF2-HMAC-SHA256 verifier 200.000 vòng,
+không lưu mã rõ.
+
+## Ký qua QR
+
+Ví dụ nguồn `coldwatch`:
+
+```bash
+bin/coldsign mcu-sign-qr \
+  keys/cold.key \
+  keys/mcu.passkey \
+  transfer/signed-qr.html
+```
+
+Sau khi thấy `QR_SCAN_READY`, hướng camera MCU vào QR trên web. Với QR động,
+giữ camera cho đến khi tiến độ đạt đủ số khung. Các khung có thể đến sai thứ
+tự và khung trùng được bỏ qua an toàn.
+
+Khi nhận đủ QR, C-signer:
+
+1. Ráp payload theo chỉ số, giải mã Base32 và giải nén PSBT trong MCU.
+2. Kiểm tra PSBT v0, đầu vào, người nhận, phí và tiền thừa.
+3. Tạo `freeze_id = SHA256(PSBT)`.
+4. Hiển thị giao dịch.
+5. Cho tối đa ba lần nhập passkey.
+6. Chỉ ký khi nhập chính xác `DONG Y`.
+7. Tính lại `freeze_id`, BIP143 và ký ECDSA.
+8. Tự kiểm tra chữ ký và ghép vào PSBT.
+9. Nén signed PSBT, tự chọn QR tĩnh/động và tạo `signed-qr.html` mode `0600`.
+
+Mở trang mô phỏng LCD:
+
+```bash
+google-chrome --new-window \
+  ~/workspace/dinhanh_k68/bitcoin-core/c-signer/transfer/signed-qr.html
+```
+
+Trang đứng yên nếu chỉ có một QR; nếu có nhiều khung, trang tự đổi mỗi 500 ms.
+
+## Hủy và sai mã
+
+- Ba lần sai mã: exit code `3`, không tạo QR đầu ra.
+- Nhập khác `DONG Y`: exit code `4`, không tạo QR đầu ra.
+- PSBT thay đổi sau khi hiển thị: từ chối ký.
+- Tệp HTML đầu ra đã tồn tại: không ghi đè.
+- Bộ đệm PSBT, chữ ký và dữ liệu nhạy cảm được làm sạch trước khi thoát.
+
+## Điểm ký
+
+Lệnh chính của flow QR:
+
+```text
+mcu-sign-qr → nhận QR → passkey → DONG Y → signed QR
+```
+
+Các lệnh ký trực tiếp `sign-digest`, `sign-p2wpkh`, `sign-psbt` vẫn bị vô hiệu
+hóa. `mcu-sign-file` được giữ làm đường kiểm thử dự phòng, vẫn bắt buộc passkey
+và `DONG Y`.
+
+## Khi đưa lên MCU thật
+
+- Nối bộ giải mã camera QR vào bộ ráp khung BBQr và giữ thư viện Zlib trên MCU.
+- Vẽ ma trận do `qrcodegen` tạo lên LCD thay vì tạo HTML/SVG.
+- Thay stdin bằng keypad và nút vật lý.
+- Chuyển khóa khỏi tệp sang flash chống đọc/phần tử bảo mật.
+- Lưu bền vững bộ đếm nhập sai để khởi động lại không xóa giới hạn thử.

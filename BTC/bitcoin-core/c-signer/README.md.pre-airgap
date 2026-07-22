@@ -1,0 +1,131 @@
+# C PSBT Cold-Signer Reference
+
+Đây là mô hình tham chiếu C dùng trên Bitcoin Core Regtest và làm nền tảng
+chuyển các khối mật mã sang Verilog. Bitcoin Core tạo PSBT, hoàn thiện PSBT đã
+ký và phát giao dịch; chương trình `coldsign` tự đọc, kiểm tra, đóng băng, băm,
+ký, tự kiểm tra và chèn chữ ký vào PSBT.
+
+> Không dùng mã này với Mainnet. Phép toán affine double-and-add và OpenSSL
+> BIGNUM không có thời gian thực thi cố định, chưa chống phân tích kênh kề,
+> gây lỗi phần cứng hoặc trích xuất khóa.
+
+## Cấu trúc
+
+```text
+c-signer/
+├── src/coldsign.c       # Bộ đọc PSBT, BIP143, ECDSA và bộ ghép chữ ký
+├── bin/coldsign         # Chương trình thực thi
+├── keys/*.key           # Khóa bí mật 256 bit, quyền 0600
+├── tests/selftest.txt   # Kết quả tự kiểm tra ECDSA xác định
+├── tests/e2e-psbt.json  # Kết quả kiểm thử PSBT đầu-cuối
+├── wallets.json         # Liên kết C key với ví Core chỉ theo dõi
+└── Makefile
+```
+
+Khóa bí mật không được nhập vào Bitcoin Core. Các ví nguồn tương ứng trong
+Bitcoin Core là ví chỉ theo dõi và phải có:
+
+```text
+private_keys_enabled: false
+```
+
+## Biên dịch và tự kiểm tra
+
+```bash
+cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+make clean all
+make test
+```
+
+Kết quả bắt buộc có `SELFTEST_OK`.
+
+## Luồng PSBT chính
+
+Kiểm tra PSBT chưa ký và lấy mã đóng băng:
+
+```bash
+bin/coldsign inspect-psbt keys/cold.key 'PSBT_BASE64'
+```
+
+Kết quả JSON chứa mạng, địa chỉ nguồn, đầu vào, từng đầu ra, phí và
+`freeze_id`. Sau khi người dùng kiểm tra đúng nội dung, ký đúng PSBT đó:
+
+```bash
+bin/coldsign sign-psbt \
+  keys/cold.key 'PSBT_BASE64' 'APPROVED_FREEZE_ID'
+```
+
+Nếu PSBT thay đổi dù chỉ một byte, mã đóng băng không khớp và chương trình từ
+chối ký. Kết quả JSON chứa `signed_psbt`, giá trị băm BIP143 và trạng thái tự
+kiểm tra chữ ký. Bitcoin Core hoàn thiện bằng:
+
+```bash
+bitcoin-cli -regtest finalizepsbt 'SIGNED_PSBT_BASE64'
+```
+
+## Kiểm tra bắt buộc trong C
+
+- PSBT phiên bản 0, đúng một đầu vào và chưa có chữ ký.
+- Đầu vào có `witness_utxo` và thuộc khóa C đã chọn.
+- Chỉ địa chỉ SegWit P2WPKH Regtest.
+- Đúng một đầu ra người nhận và tối đa một đầu ra tiền thừa.
+- Tổng đầu ra không vượt đầu vào.
+- Phí bằng tổng đầu vào trừ tổng đầu ra, lớn hơn 0 và không quá 1.000.000
+  satoshi.
+- Chỉ dùng `SIGHASH_ALL`.
+- Chữ ký ECDSA được tự kiểm tra trước khi xuất.
+
+## Các lệnh tham chiếu cũ
+
+Các lệnh sau vẫn được giữ để kiểm thử từng khối toán học:
+
+```bash
+bin/coldsign keygen keys/example.key
+bin/coldsign info keys/cold.key
+bin/coldsign sign-digest keys/cold.key DIGEST32_HEX
+bin/coldsign sighash-p2wpkh keys/cold.key UNSIGNED_TX_HEX PREVOUT_SAT
+bin/coldsign sign-p2wpkh keys/cold.key UNSIGNED_TX_HEX PREVOUT_SAT
+bin/coldsign selftest
+```
+
+Web không dùng đường ký giao dịch thô cũ; web chỉ dùng `inspect-psbt` và
+`sign-psbt`.
+
+## Luồng hệ thống
+
+```text
+Trình duyệt nhập nguồn, người nhận, số tiền
+  ↓
+Bitcoin Core tạo và bổ sung dữ liệu UTXO vào PSBT
+  ↓
+C inspect-psbt: đọc, kiểm tra, tính phí, hiển thị dữ liệu và tạo freeze_id
+  ↓
+Người dùng đánh dấu đã kiểm tra và nhấn xác nhận
+  ↓
+C sign-psbt: kiểm tra freeze_id, BIP143, RFC6979, ECDSA, low-S, DER
+  ↓
+C tự xác minh chữ ký và chèn partial signature vào PSBT
+  ↓
+Bitcoin Core finalizepsbt → testmempoolaccept → sendrawtransaction
+  ↓
+Regtest mempool/block
+```
+
+## Ánh xạ sang MCU và FPGA sau này
+
+- MCU: đọc PSBT, kiểm tra đầu vào/đầu ra, tính phí, hiển thị, nhận xác nhận và
+  ghép chữ ký vào PSBT.
+- FPGA: giữ khóa, tạo BIP143, SHA-256 hai lần, RFC6979, secp256k1/ECDSA,
+  low-S, DER và tự kiểm tra chữ ký.
+
+Hiện tại toàn bộ hai nhóm chức năng đều nằm trong C theo yêu cầu, chưa dùng
+FPGA.
+
+## Giới hạn
+
+- Regtest, PSBT v0, đúng một đầu vào P2WPKH.
+- Đúng một người nhận, tối đa một đầu ra tiền thừa.
+- Chỉ `SIGHASH_ALL` và ECDSA secp256k1.
+- Chưa hỗ trợ nhiều đầu vào, multisig, Taproot/Schnorr hoặc thiết bị tách rời.
+- Web công khai qua TryCloudflare chỉ dành cho thử nghiệm và chưa có xác thực
+  người dùng mạnh.

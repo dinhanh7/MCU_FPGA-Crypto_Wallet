@@ -1,0 +1,81 @@
+# Web Bitcoin Regtest – quy trình MCU ngoại tuyến
+
+Web chỉ đóng vai trò máy trực tuyến. Không có API ký và web không truy cập khóa
+bí mật.
+
+## Sử dụng
+
+### 1. Tạo PSBT chưa ký
+
+1. Chọn ví MCU nguồn.
+2. Nhập địa chỉ Regtest nhận tiền.
+3. Nhập số Bitcoin.
+4. Nhấn **Tạo và tải PSBT chưa ký**.
+5. Trình duyệt tải tệp `unsigned-SOURCE.psbt`.
+
+### 2. Chuyển sang MCU và ký
+
+Chép tệp bằng USB/UART/thẻ nhớ. Trong mô phỏng hiện tại:
+
+```bash
+cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+bin/coldsign mcu-sign-file \
+  keys/cold.key \
+  keys/mcu.passkey \
+  /đường/dẫn/unsigned-coldwatch.psbt \
+  /đường/dẫn/signed-coldwatch.psbt
+```
+
+Kiểm tra giao dịch trên màn hình mô phỏng, nhập mã, sau đó nhập `DONG Y`.
+
+### 3. Hoàn thiện và phát
+
+1. Quay lại web.
+2. Chọn nguồn dùng để theo dõi.
+3. Chọn tệp `signed.psbt` từ MCU.
+4. Nhấn **Kiểm tra → Hoàn thiện → Phát**.
+5. Đào một block nếu muốn giao dịch có một lần xác nhận.
+
+## API
+
+```text
+GET  /api/status
+POST /api/wallet
+POST /api/address
+POST /api/mcu/register
+POST /api/psbt/create
+POST /api/psbt/broadcast
+POST /api/cold/mine
+```
+
+Không còn các endpoint ký trực tiếp:
+
+```text
+/api/cold/prepare    removed
+/api/cold/confirm    removed
+/api/cold/cancel     removed
+/api/cold/send       removed
+```
+
+## Đăng ký một MCU mới
+
+Tạo khóa trong MCU/C-signer và lấy khóa công khai:
+
+```bash
+bin/coldsign keygen keys/treasury.key
+bin/coldsign info keys/treasury.key
+```
+
+Nhập tên và trường `pubkey` vào mục **Đăng ký ví công khai của MCU** trên web.
+Web tạo một Bitcoin Core descriptor wallet với
+`private_keys_enabled: false`.
+
+## Tiến trình
+
+- Bitcoin Core: tmux `btc:bitcoin`.
+- Web máy trực tuyến: tmux `btc:dashboard`.
+- TryCloudflare: tmux `btc:tunnel`.
+- Terminal MCU mô phỏng/build: tmux `btc:c-signer-build`.
+
+TryCloudflare chỉ truy cập web tạo/nhận PSBT. Nó không có endpoint gọi
+C-signer để tạo chữ ký.

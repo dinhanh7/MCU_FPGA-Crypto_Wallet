@@ -1,0 +1,67 @@
+# Web Bitcoin Regtest – giao tiếp MCU bằng QR
+
+Web trao đổi PSBT với MCU bằng QR động BBQr. Không tải PSBT bằng tệp trong flow
+chính và không có API ký.
+
+## Cách sử dụng
+
+### 1. Web → MCU
+
+1. Chọn ví MCU nguồn.
+2. Nhập địa chỉ nhận và số Bitcoin.
+3. Nhấn **Tạo QR PSBT chưa ký**.
+4. Web hiển thị 3–n khung QR động.
+5. Hướng camera/đầu đọc QR của MCU vào màn hình web cho đến khi C báo nhận đủ.
+
+### 2. Xác nhận trên MCU
+
+Trong mô phỏng:
+
+```bash
+cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+bin/coldsign mcu-sign-qr \
+  keys/cold.key \
+  keys/mcu.passkey \
+  transfer/signed-qr.html
+```
+
+Kiểm tra địa chỉ, số tiền, phí, tiền thừa và `freeze_id`; nhập passkey rồi nhập
+`DONG Y`. Mở `transfer/signed-qr.html` toàn màn hình để mô phỏng LCD MCU.
+
+### 3. MCU → Web
+
+1. Trên web nhấn **Bật camera quét QR đã ký**.
+2. Hướng webcam vào QR động trên MCU/màn hình mô phỏng.
+3. Chờ tiến độ đạt đủ số khung.
+4. Nhấn **Hoàn thiện → Phát**.
+5. Đào một block để xác nhận giao dịch Regtest.
+
+Trình duyệt tạo và đọc QR cục bộ bằng các thư viện đã lưu trong thư mục web;
+PSBT không được gửi tới dịch vụ tạo QR bên ngoài.
+
+## API
+
+```text
+GET  /api/status
+POST /api/wallet
+POST /api/address
+POST /api/mcu/register
+POST /api/psbt/create
+POST /api/psbt/broadcast
+POST /api/cold/mine
+```
+
+Không tồn tại endpoint gọi C-signer. `/api/psbt/create` chỉ trả PSBT chưa ký;
+`/api/psbt/broadcast` chỉ nhận PSBT đã có chữ ký hợp lệ để Bitcoin Core hoàn
+thiện và phát.
+
+## Thành phần QR
+
+```text
+qrcode.min.js  tạo QR BBQr trên web
+jsQR.js         quét QR từ webcam
+BBQr H/P        chia/rắp PSBT nhiều khung
+```
+
+Webcam cần HTTPS hoặc localhost và người dùng phải cấp quyền camera. Đường
+TryCloudflare đáp ứng điều kiện HTTPS.

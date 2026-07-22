@@ -1,0 +1,19 @@
+{
+  "wallets": [
+    {
+      "name": "coldwatch",
+      "core_wallet": "coldwatch",
+      "key_file": "cold.key"
+    },
+    {
+      "name": "cstest",
+      "core_wallet": "c_cstest",
+      "key_file": "cstest.key"
+    },
+    {
+      "name": "danh_c",
+      "core_wallet": "c_danh_c",
+      "key_file": "danh_c.key"
+    }
+  ]
+}

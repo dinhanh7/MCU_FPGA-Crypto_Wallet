@@ -1,0 +1,21 @@
+CC ?= cc
+CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Wpedantic
+LDLIBS ?= -lcrypto
+
+BIN := bin/coldsign
+SRC := src/coldsign.c
+
+.PHONY: all clean test
+
+all: $(BIN)
+
+$(BIN): $(SRC)
+	mkdir -p bin
+	$(CC) $(CFLAGS) -Wno-deprecated-declarations $(SRC) -o $(BIN) $(LDLIBS)
+
+test: $(BIN)
+	mkdir -p tests
+	$(BIN) selftest | tee tests/selftest.txt
+
+clean:
+	rm -f $(BIN)

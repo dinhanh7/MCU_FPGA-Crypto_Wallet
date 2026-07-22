@@ -1,0 +1,71 @@
+MINER_ADDRESS=bcrt1qk5gsqyfff4zxrdxsn6lathtw6szut3a5640kka
+RECEIVER_ADDRESS=bcrt1q8f0m7a0hvlh8g4mw5cpvmnve0jupl4rkgqa7uv
+TXID=ab5f2eae47c7ee19e4db176ba69fd39a5678aad544845269f262a59fd9dcd0fa
+BLOCKCHAIN_INFO
+{
+  "chain": "regtest",
+  "blocks": 203,
+  "headers": 203,
+  "bestblockhash": "7761f137436efac66c14abb54cae63f1ca98b4ea78d07708f77b7917a801f808",
+  "bits": "207fffff",
+  "target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+  "difficulty": 4.656542373906925e-10,
+  "time": 1784539262,
+  "mediantime": 1784539262,
+  "verificationprogress": 1,
+  "initialblockdownload": false,
+  "chainwork": "0000000000000000000000000000000000000000000000000000000000000198",
+  "size_on_disk": 61096,
+  "pruned": false,
+  "warnings": [
+  ]
+}
+RECEIVER_BALANCE
+1.00000000
+MINER_BALANCE
+5148.99999859
+TRANSACTION
+{
+  "amount": -1.00000000,
+  "fee": -0.00000141,
+  "confirmations": 1,
+  "blockhash": "7761f137436efac66c14abb54cae63f1ca98b4ea78d07708f77b7917a801f808",
+  "blockheight": 203,
+  "blockindex": 1,
+  "blocktime": 1784539262,
+  "txid": "ab5f2eae47c7ee19e4db176ba69fd39a5678aad544845269f262a59fd9dcd0fa",
+  "wtxid": "70f0d3efa5530aaef6c129a294b1aa9452247e3d1b50e7e5a5ceef8a6182a2aa",
+  "walletconflicts": [
+  ],
+  "mempoolconflicts": [
+  ],
+  "time": 1784539248,
+  "timereceived": 1784539248,
+  "bip125-replaceable": "no",
+  "details": [
+    {
+      "address": "bcrt1q8f0m7a0hvlh8g4mw5cpvmnve0jupl4rkgqa7uv",
+      "category": "send",
+      "amount": -1.00000000,
+      "vout": 1,
+      "fee": -0.00000141,
+      "abandoned": false
+    }
+  ],
+  "hex": "020000000001012546b3155a40ee7d491774a965f870f1c3fe218e5bf48e0df1947a9f6ba4fdfc0000000000fdffffff027310102401000000160014142623678b7f6ce6b2c0d814b2579791594032a400e1f505000000001600143a5fbf75f767ee74576ea602cdcd997cb81fd476024730440220499998eaafcbc59dcd5260c9fc9fdaa1d116c2c6ea611635f6d6c4614dfb520c0220713bac3acb025ce917e2f3fce87c40e1496ad1434ff2f686fd2a7bb3fde0bf65012102be72ba436a913f7c69b6458ebe9a06320d77eb63513c48ed64a258b865413cc6ca000000",
+  "lastprocessedblock": {
+    "hash": "7761f137436efac66c14abb54cae63f1ca98b4ea78d07708f77b7917a801f808",
+    "height": 203
+  }
+}
+BLOCKCOUNT
+203
+MEMPOOL
+[
+]
+STATUS_SCRIPT
+chain: regtest
+block_height: 203
+balance_miner: 5148.99999859;
+balance_receiver: 1.00000000;
+mempool: []

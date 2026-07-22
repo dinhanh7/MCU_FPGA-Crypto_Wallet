@@ -1,0 +1,19 @@
+{
+  "tested_at": "2026-07-21",
+  "network": "regtest",
+  "web_created_unsigned_psbt": true,
+  "wrong_passkey_rejected": true,
+  "cancel_rejected": true,
+  "mcu_displayed_transaction": true,
+  "mcu_freeze_verified": true,
+  "mcu_signature_verified": true,
+  "signed_psbt_created": true,
+  "bitcoin_core_finalize_complete": true,
+  "bitcoin_core_mempool_allowed": true,
+  "txid": "05f6670a28c81bb4e66077ed4f2c9e1881b5d6c2d34b07571a60f6acc9831ff6",
+  "confirmations": 1,
+  "mempool_count_after_confirmation": 0,
+  "old_web_sign_api_http_status": 404,
+  "legacy_direct_sign_exit_status": 2,
+  "passkey_record_mode": "0600"
+}

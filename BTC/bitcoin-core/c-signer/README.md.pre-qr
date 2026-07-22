@@ -1,0 +1,131 @@
+# MCU C-signer – ví lạnh PSBT Regtest
+
+`coldsign` mô phỏng toàn bộ phần mềm MCU ví lạnh. Máy trực tuyến chỉ tạo PSBT
+chưa ký và nhận lại PSBT đã ký; nó không được gọi hàm ký. Việc chuyển tệp
+`.psbt` mô phỏng USB, UART hoặc thẻ nhớ.
+
+> Đây là mô hình nghiên cứu Regtest. Terminal mô phỏng màn hình và nút bấm
+> MCU. Khóa hiện là tệp mode `0600`, chưa phải bộ nhớ bảo mật của MCU. Không
+> dùng mã này với Mainnet.
+
+## Luồng
+
+```text
+Bitcoin Core tạo unsigned.psbt
+  ↓ tệp/USB/UART/thẻ nhớ
+C-signer MCU đọc và khóa bộ đệm bằng freeze_id
+  ↓
+Hiển thị nguồn, người nhận, số tiền, phí, tiền thừa
+  ↓
+Nhập mã mở khóa → DONG Y hoặc HUY
+  ↓
+BIP143 → RFC6979 → ECDSA secp256k1 → low-S → DER
+  ↓
+Tự kiểm tra chữ ký → ghép vào PSBT → signed.psbt
+  ↓ tệp/USB/UART/thẻ nhớ
+Bitcoin Core finalizepsbt → testmempoolaccept → sendrawtransaction
+```
+
+## Biên dịch
+
+```bash
+cd ~/workspace/dinhanh_k68/bitcoin-core/c-signer
+make clean all test
+```
+
+Kết quả tự kiểm tra phải có:
+
+```text
+SELFTEST_OK
+```
+
+## Thiết lập mã mở khóa
+
+Mỗi thiết bị thiết lập một lần:
+
+```bash
+bin/coldsign mcu-setup-passkey keys/mcu.passkey
+```
+
+Mã phải gồm 6–12 chữ số và được nhập hai lần. Tệp không lưu mã rõ; nó lưu salt
+ngẫu nhiên và bộ kiểm tra PBKDF2-HMAC-SHA256 với 200.000 vòng, quyền `0600`.
+
+## Ký PSBT trên MCU mô phỏng
+
+Ví dụ với nguồn `coldwatch`:
+
+```bash
+bin/coldsign mcu-sign-file \
+  keys/cold.key \
+  keys/mcu.passkey \
+  /đường/dẫn/unsigned-coldwatch.psbt \
+  /đường/dẫn/signed-coldwatch.psbt
+```
+
+Chương trình thực hiện theo thứ tự:
+
+1. Nhận tệp PSBT nhị phân hoặc PSBT Base64.
+2. Đọc và kiểm tra PSBT.
+3. Kiểm tra đầu vào thuộc khóa MCU.
+4. Tính số tiền, phí và tiền thừa.
+5. Tạo `freeze_id = SHA256(PSBT)` và không sửa bộ đệm.
+6. Hiển thị giao dịch trong terminal mô phỏng màn hình.
+7. Cho tối đa ba lần nhập mã mở khóa.
+8. Yêu cầu nhập chính xác `DONG Y`; mọi giá trị khác là Hủy.
+9. Tính lại `freeze_id`; khác ban đầu thì từ chối.
+10. Tạo BIP143 sighash, ký ECDSA, chuẩn hóa low-S/DER.
+11. Tự xác minh chữ ký.
+12. Ghép chữ ký vào PSBT và tạo tệp đầu ra mode `0600`.
+
+Nếu sai mã hoặc Hủy, bộ đệm được làm sạch và tệp đầu ra không được tạo. Tệp
+đầu ra đã tồn tại cũng không bị ghi đè.
+
+## Điểm ký duy nhất
+
+Binary phát hành không còn các lệnh ký bỏ qua xác nhận:
+
+```text
+sign-digest       disabled
+sign-p2wpkh       disabled
+sign-psbt         disabled
+```
+
+Mọi chữ ký giao dịch bắt buộc đi qua:
+
+```text
+mcu-sign-file → mã mở khóa → DONG Y
+```
+
+Các lệnh còn lại:
+
+```bash
+bin/coldsign keygen KEYFILE
+bin/coldsign info KEYFILE
+bin/coldsign inspect-psbt KEYFILE PSBT_BASE64
+bin/coldsign selftest
+```
+
+`keygen` và `info` dùng khi cấp phát thiết bị. Chỉ khóa công khai từ `info`
+được đăng ký với web/Bitcoin Core.
+
+## Phạm vi PSBT
+
+- PSBT phiên bản 0.
+- Đúng một đầu vào native P2WPKH.
+- Đúng một người nhận và tối đa một đầu ra tiền thừa.
+- Chỉ địa chỉ Regtest `bcrt1q...` P2WPKH.
+- Chỉ `SIGHASH_ALL`.
+- Phí lớn hơn 0 và không quá 1.000.000 satoshi.
+- Chưa hỗ trợ nhiều đầu vào, multisig hoặc Taproot/Schnorr.
+
+## Khi chuyển sang MCU thật
+
+Thay các phần mô phỏng bằng trình điều khiển phần cứng:
+
+- Đọc/ghi tệp → USB/UART/thẻ nhớ.
+- `printf` → màn hình MCU.
+- Nhập `DONG Y`/`HUY` → nút vật lý.
+- Nhập mã qua terminal → bàn phím/keypad.
+- Tệp khóa → flash bảo vệ đọc hoặc phần tử bảo mật.
+- PBKDF2 và bộ đếm thử sai cần lưu bền vững để chống khởi động lại nhằm xóa
+  giới hạn thử.

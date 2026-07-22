@@ -1,0 +1,1430 @@
+/*
+ * coldsign.c - educational MCU cold-wallet simulator for Bitcoin Regtest.
+ *
+ * Hardware-oriented reference model:
+ *   - BIP143 SIGHASH_ALL preimage
+ *   - RFC6979 deterministic nonce (HMAC-SHA256)
+ *   - secp256k1 point arithmetic (affine double-and-add)
+ *   - ECDSA signing with low-S normalization
+ *   - DER serialization and SegWit witness assembly
+ *
+ * OpenSSL is used only for BIGNUM, SHA256, RIPEMD160, HMAC and RAND.
+ * This code is intentionally straightforward, not constant-time, and MUST NOT
+ * be used with mainnet keys or production funds.
+ *
+ * The mcu-sign-file command receives a PSBT file through an air-gap-like file
+ * transport, verifies and freezes it, displays the transaction, requires a
+ * local numeric passkey and explicit approval, signs, self-verifies, and
+ * writes a distinct signed PSBT file. Direct unattended signing commands are
+ * intentionally not exposed by the release CLI.
+ */
+
+#include <errno.h>
+#include <fcntl.h>
+#include <openssl/bn.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/ripemd.h>
+#include <openssl/sha.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <unistd.h>
+
+#define MAX_PSBT_FILE_SIZE (1024U * 1024U)
+#define PASSKEY_ITERATIONS 200000
+
+typedef struct {
+    BIGNUM *x;
+    BIGNUM *y;
+    int infinity;
+} Point;
+
+typedef struct {
+    uint8_t *p;
+    size_t len;
+    size_t cap;
+} Buffer;
+
+typedef struct {
+    const uint8_t *raw;
+    size_t raw_len;
+    const uint8_t *version;
+    const uint8_t *vin_count;
+    size_t vin_count_len;
+    const uint8_t *input;
+    size_t input_len;
+    const uint8_t *outpoint;
+    const uint8_t *sequence;
+    const uint8_t *vout_count;
+    size_t vout_count_len;
+    const uint8_t *outputs;
+    size_t outputs_len;
+    const uint8_t *locktime;
+    uint64_t output_count;
+} ParsedTx;
+
+typedef struct {
+    uint8_t *raw;
+    size_t raw_len;
+    const uint8_t *unsigned_tx;
+    size_t unsigned_tx_len;
+    ParsedTx tx;
+    uint64_t prevout_sat;
+    const uint8_t *prevout_script;
+    size_t prevout_script_len;
+    size_t input_separator_offset;
+    int has_partial_signature;
+} ParsedPsbt;
+
+typedef struct {
+    uint64_t amount_sat;
+    const uint8_t *script;
+    size_t script_len;
+} TxOutput;
+
+static BIGNUM *P_FIELD;
+static BIGNUM *N_ORDER;
+static BIGNUM *GX;
+static BIGNUM *GY;
+static BIGNUM *N_HALF;
+static BN_CTX *CTX;
+
+static void die(const char *msg)
+{
+    fprintf(stderr, "error: %s\n", msg);
+    exit(1);
+}
+
+static void die_ssl(const char *msg)
+{
+    fprintf(stderr, "openssl error: %s\n", msg);
+    exit(1);
+}
+
+static void curve_init(void)
+{
+    CTX = BN_CTX_new();
+    BN_hex2bn(&P_FIELD, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+    BN_hex2bn(&N_ORDER, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+    BN_hex2bn(&GX, "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
+    BN_hex2bn(&GY, "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
+    N_HALF = BN_dup(N_ORDER);
+    if (!CTX || !P_FIELD || !N_ORDER || !GX || !GY || !N_HALF)
+        die_ssl("curve initialization");
+    BN_rshift1(N_HALF, N_HALF);
+}
+
+static void curve_free(void)
+{
+    BN_free(P_FIELD);
+    BN_free(N_ORDER);
+    BN_free(GX);
+    BN_free(GY);
+    BN_free(N_HALF);
+    BN_CTX_free(CTX);
+}
+
+static Point point_new(void)
+{
+    Point p = {BN_new(), BN_new(), 1};
+    if (!p.x || !p.y) die_ssl("point allocation");
+    return p;
+}
+
+static void point_free(Point *p)
+{
+    BN_free(p->x);
+    BN_free(p->y);
+    p->x = p->y = NULL;
+}
+
+static void point_copy(Point *dst, const Point *src)
+{
+    dst->infinity = src->infinity;
+    if (!src->infinity) {
+        BN_copy(dst->x, src->x);
+        BN_copy(dst->y, src->y);
+    }
+}
+
+static void point_generator(Point *g)
+{
+    g->infinity = 0;
+    BN_copy(g->x, GX);
+    BN_copy(g->y, GY);
+}
+
+/* Affine point doubling: lambda=(3*x^2)/(2*y), x3=lambda^2-2*x. */
+static void point_double(Point *r, const Point *a)
+{
+    if (a->infinity || BN_is_zero(a->y)) {
+        r->infinity = 1;
+        return;
+    }
+
+    BN_CTX_start(CTX);
+    BIGNUM *num = BN_CTX_get(CTX);
+    BIGNUM *den = BN_CTX_get(CTX);
+    BIGNUM *inv = BN_CTX_get(CTX);
+    BIGNUM *lam = BN_CTX_get(CTX);
+    BIGNUM *x3 = BN_CTX_get(CTX);
+    BIGNUM *y3 = BN_CTX_get(CTX);
+    BIGNUM *tmp = BN_CTX_get(CTX);
+    if (!tmp) die_ssl("BN_CTX point_double");
+
+    BN_mod_sqr(num, a->x, P_FIELD, CTX);
+    BN_mul_word(num, 3);
+    BN_mod(num, num, P_FIELD, CTX);
+    BN_mod_lshift1(den, a->y, P_FIELD, CTX);
+    if (!BN_mod_inverse(inv, den, P_FIELD, CTX)) die_ssl("point_double inverse");
+    BN_mod_mul(lam, num, inv, P_FIELD, CTX);
+
+    BN_mod_sqr(x3, lam, P_FIELD, CTX);
+    BN_mod_lshift1(tmp, a->x, P_FIELD, CTX);
+    BN_mod_sub(x3, x3, tmp, P_FIELD, CTX);
+
+    BN_mod_sub(tmp, a->x, x3, P_FIELD, CTX);
+    BN_mod_mul(y3, lam, tmp, P_FIELD, CTX);
+    BN_mod_sub(y3, y3, a->y, P_FIELD, CTX);
+
+    BN_copy(r->x, x3);
+    BN_copy(r->y, y3);
+    r->infinity = 0;
+    BN_CTX_end(CTX);
+}
+
+/* Affine point addition. */
+static void point_add(Point *r, const Point *a, const Point *b)
+{
+    if (a->infinity) {
+        point_copy(r, b);
+        return;
+    }
+    if (b->infinity) {
+        point_copy(r, a);
+        return;
+    }
+    if (BN_cmp(a->x, b->x) == 0) {
+        if (BN_cmp(a->y, b->y) == 0) point_double(r, a);
+        else r->infinity = 1;
+        return;
+    }
+
+    BN_CTX_start(CTX);
+    BIGNUM *num = BN_CTX_get(CTX);
+    BIGNUM *den = BN_CTX_get(CTX);
+    BIGNUM *inv = BN_CTX_get(CTX);
+    BIGNUM *lam = BN_CTX_get(CTX);
+    BIGNUM *x3 = BN_CTX_get(CTX);
+    BIGNUM *y3 = BN_CTX_get(CTX);
+    BIGNUM *tmp = BN_CTX_get(CTX);
+    if (!tmp) die_ssl("BN_CTX point_add");
+
+    BN_mod_sub(num, b->y, a->y, P_FIELD, CTX);
+    BN_mod_sub(den, b->x, a->x, P_FIELD, CTX);
+    if (!BN_mod_inverse(inv, den, P_FIELD, CTX)) die_ssl("point_add inverse");
+    BN_mod_mul(lam, num, inv, P_FIELD, CTX);
+
+    BN_mod_sqr(x3, lam, P_FIELD, CTX);
+    BN_mod_sub(x3, x3, a->x, P_FIELD, CTX);
+    BN_mod_sub(x3, x3, b->x, P_FIELD, CTX);
+
+    BN_mod_sub(tmp, a->x, x3, P_FIELD, CTX);
+    BN_mod_mul(y3, lam, tmp, P_FIELD, CTX);
+    BN_mod_sub(y3, y3, a->y, P_FIELD, CTX);
+
+    BN_copy(r->x, x3);
+    BN_copy(r->y, y3);
+    r->infinity = 0;
+    BN_CTX_end(CTX);
+}
+
+/* Educational double-and-add scalar multiplication, LSB first. */
+static void scalar_mul(Point *r, const BIGNUM *k, const Point *p)
+{
+    Point acc = point_new();
+    Point add = point_new();
+    Point tmp = point_new();
+    point_copy(&add, p);
+
+    int bits = BN_num_bits(k);
+    for (int i = 0; i < bits; ++i) {
+        if (BN_is_bit_set(k, i)) {
+            point_add(&tmp, &acc, &add);
+            point_copy(&acc, &tmp);
+        }
+        point_double(&tmp, &add);
+        point_copy(&add, &tmp);
+    }
+    point_copy(r, &acc);
+    point_free(&acc);
+    point_free(&add);
+    point_free(&tmp);
+}
+
+static void sha256_once(const uint8_t *in, size_t len, uint8_t out[32])
+{
+    SHA256(in, len, out);
+}
+
+static void sha256d(const uint8_t *in, size_t len, uint8_t out[32])
+{
+    uint8_t tmp[32];
+    SHA256(in, len, tmp);
+    SHA256(tmp, sizeof(tmp), out);
+}
+
+static void hash160(const uint8_t *in, size_t len, uint8_t out[20])
+{
+    uint8_t sha[32];
+    SHA256(in, len, sha);
+    if (!RIPEMD160(sha, sizeof(sha), out)) die_ssl("HASH160");
+}
+
+static uint32_t bech32_polymod_step(uint32_t pre)
+{
+    uint8_t top = (uint8_t)(pre >> 25);
+    uint32_t chk = (pre & 0x1ffffff) << 5;
+    static const uint32_t gen[5] = {
+        0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3
+    };
+    for (int i = 0; i < 5; ++i)
+        if ((top >> i) & 1) chk ^= gen[i];
+    return chk;
+}
+
+static void p2wpkh_regtest_address(const uint8_t hash[20], char out[91])
+{
+    static const char charset[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    static const char hrp[] = "bcrt";
+    uint8_t data[33];
+    data[0] = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+    size_t data_len = 1;
+    for (size_t i = 0; i < 20; ++i) {
+        acc = (acc << 8) | hash[i];
+        bits += 8;
+        while (bits >= 5) {
+            bits -= 5;
+            data[data_len++] = (uint8_t)((acc >> bits) & 31);
+        }
+    }
+    if (bits) data[data_len++] = (uint8_t)((acc << (5 - bits)) & 31);
+
+    uint32_t chk = 1;
+    for (size_t i = 0; i < sizeof(hrp) - 1; ++i)
+        chk = bech32_polymod_step(chk) ^ ((uint8_t)hrp[i] >> 5);
+    chk = bech32_polymod_step(chk);
+    for (size_t i = 0; i < sizeof(hrp) - 1; ++i)
+        chk = bech32_polymod_step(chk) ^ ((uint8_t)hrp[i] & 31);
+    for (size_t i = 0; i < data_len; ++i)
+        chk = bech32_polymod_step(chk) ^ data[i];
+    for (int i = 0; i < 6; ++i) chk = bech32_polymod_step(chk);
+    chk ^= 1;
+
+    size_t pos = 0;
+    memcpy(out + pos, hrp, sizeof(hrp) - 1);
+    pos += sizeof(hrp) - 1;
+    out[pos++] = '1';
+    for (size_t i = 0; i < data_len; ++i) out[pos++] = charset[data[i]];
+    for (int i = 0; i < 6; ++i)
+        out[pos++] = charset[(chk >> (5 * (5 - i))) & 31];
+    out[pos] = '\0';
+}
+
+static void hmac256(const uint8_t key[32], const uint8_t *data, size_t len,
+                    uint8_t out[32])
+{
+    unsigned int out_len = 0;
+    if (!HMAC(EVP_sha256(), key, 32, data, len, out, &out_len) || out_len != 32)
+        die_ssl("HMAC-SHA256");
+}
+
+static int hex_value(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static uint8_t *hex_decode(const char *hex, size_t *out_len)
+{
+    size_t n = strlen(hex);
+    while (n && (hex[n - 1] == '\n' || hex[n - 1] == '\r' || hex[n - 1] == ' '))
+        --n;
+    if (n == 0 || (n & 1)) die("invalid hex length");
+    uint8_t *out = malloc(n / 2);
+    if (!out) die("out of memory");
+    for (size_t i = 0; i < n; i += 2) {
+        int hi = hex_value(hex[i]), lo = hex_value(hex[i + 1]);
+        if (hi < 0 || lo < 0) die("invalid hex character");
+        out[i / 2] = (uint8_t)((hi << 4) | lo);
+    }
+    *out_len = n / 2;
+    return out;
+}
+
+static void hex_print(const uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) printf("%02x", p[i]);
+}
+
+static uint8_t *base64_decode(const char *text, size_t *out_len)
+{
+    size_t n = strlen(text);
+    if (n == 0 || (n % 4) != 0) die("invalid PSBT base64 length");
+    uint8_t *out = malloc((n / 4) * 3 + 1);
+    if (!out) die("out of memory");
+    int decoded = EVP_DecodeBlock(out, (const unsigned char *)text, (int)n);
+    if (decoded < 0) die("invalid PSBT base64");
+    size_t padding = 0;
+    if (n && text[n - 1] == '=') padding++;
+    if (n > 1 && text[n - 2] == '=') padding++;
+    *out_len = (size_t)decoded - padding;
+    return out;
+}
+
+static char *base64_encode(const uint8_t *raw, size_t len)
+{
+    size_t cap = 4 * ((len + 2) / 3) + 1;
+    char *out = malloc(cap);
+    if (!out) die("out of memory");
+    int n = EVP_EncodeBlock((unsigned char *)out, raw, (int)len);
+    if (n < 0) die_ssl("base64 encoding");
+    out[n] = '\0';
+    return out;
+}
+
+static void bn_to_32(const BIGNUM *v, uint8_t out[32])
+{
+    if (BN_bn2binpad(v, out, 32) != 32) die_ssl("BN_bn2binpad");
+}
+
+static BIGNUM *read_key(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) die("cannot open key file");
+    char s[256];
+    if (!fgets(s, sizeof(s), f)) die("cannot read key file");
+    fclose(f);
+    size_t n;
+    uint8_t *raw = hex_decode(s, &n);
+    if (n != 32) die("private key must be 32 bytes");
+    BIGNUM *d = BN_bin2bn(raw, 32, NULL);
+    OPENSSL_cleanse(raw, n);
+    free(raw);
+    if (!d || BN_is_zero(d) || BN_cmp(d, N_ORDER) >= 0) die("invalid private key");
+    return d;
+}
+
+static void write_key(const char *path, const uint8_t raw[32])
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) die("key file exists or cannot be created");
+    char s[65];
+    for (int i = 0; i < 32; ++i) snprintf(s + i * 2, 3, "%02x", raw[i]);
+    s[64] = '\n';
+    if (write(fd, s, 65) != 65) die("cannot write key file");
+    fsync(fd);
+    close(fd);
+    OPENSSL_cleanse(s, sizeof(s));
+}
+
+static uint8_t *read_binary_file(const char *path, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) die("cannot open PSBT input file");
+    if (fseek(f, 0, SEEK_END) != 0) die("cannot seek PSBT input file");
+    long size = ftell(f);
+    if (size <= 0 || (unsigned long)size > MAX_PSBT_FILE_SIZE)
+        die("PSBT input file is empty or too large");
+    rewind(f);
+    uint8_t *data = malloc((size_t)size + 1);
+    if (!data) die("out of memory");
+    if (fread(data, 1, (size_t)size, f) != (size_t)size)
+        die("cannot read complete PSBT input file");
+    fclose(f);
+    data[size] = 0;
+    *out_len = (size_t)size;
+    return data;
+}
+
+static char *psbt_file_to_base64(const char *path)
+{
+    size_t file_len;
+    uint8_t *file_data = read_binary_file(path, &file_len);
+    static const uint8_t magic[5] = {'p','s','b','t',0xff};
+    char *psbt64;
+    if (file_len >= sizeof(magic) &&
+        memcmp(file_data, magic, sizeof(magic)) == 0) {
+        psbt64 = base64_encode(file_data, file_len);
+    } else {
+        psbt64 = malloc(file_len + 1);
+        if (!psbt64) die("out of memory");
+        size_t n = 0;
+        for (size_t i = 0; i < file_len; ++i) {
+            unsigned char c = file_data[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+            psbt64[n++] = (char)c;
+        }
+        psbt64[n] = '\0';
+        if (n == 0) die("PSBT text file contains no data");
+    }
+    OPENSSL_cleanse(file_data, file_len);
+    free(file_data);
+    return psbt64;
+}
+
+static void write_binary_file_exclusive(const char *path,
+                                        const uint8_t *data, size_t len)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) die("output file exists or cannot be created");
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, data + off, len - off);
+        if (n <= 0) {
+            close(fd);
+            unlink(path);
+            die("cannot write signed PSBT output file");
+        }
+        off += (size_t)n;
+    }
+    if (fsync(fd) != 0) {
+        close(fd);
+        unlink(path);
+        die("cannot flush signed PSBT output file");
+    }
+    close(fd);
+}
+
+static int read_hidden_line(const char *prompt, char *out, size_t cap)
+{
+    struct termios old_attr, new_attr;
+    int hidden = isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &old_attr) == 0;
+    fprintf(stderr, "%s", prompt);
+    fflush(stderr);
+    if (hidden) {
+        new_attr = old_attr;
+        new_attr.c_lflag &= (tcflag_t)~ECHO;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_attr);
+    }
+    char *ok = fgets(out, (int)cap, stdin);
+    if (hidden) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &old_attr);
+        fputc('\n', stderr);
+    }
+    if (!ok) return 0;
+    size_t n = strlen(out);
+    while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = '\0';
+    return 1;
+}
+
+static int valid_numeric_passkey(const char *passkey)
+{
+    size_t n = strlen(passkey);
+    if (n < 6 || n > 12) return 0;
+    for (size_t i = 0; i < n; ++i)
+        if (passkey[i] < '0' || passkey[i] > '9') return 0;
+    return 1;
+}
+
+static void derive_passkey_verifier(const char *passkey, const uint8_t salt[16],
+                                    int iterations, uint8_t out[32])
+{
+    if (PKCS5_PBKDF2_HMAC(passkey, (int)strlen(passkey), salt, 16,
+                          iterations, EVP_sha256(), 32, out) != 1)
+        die_ssl("PBKDF2 passkey derivation");
+}
+
+static void write_passkey_record(const char *path, const uint8_t salt[16],
+                                 const uint8_t verifier[32])
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) die("passkey record exists or cannot be created");
+    char text[128];
+    int pos = snprintf(text, sizeof(text), "CSPIN1\n%d\n", PASSKEY_ITERATIONS);
+    for (int i = 0; i < 16; ++i) pos += snprintf(text + pos, sizeof(text) - (size_t)pos,
+                                                "%02x", salt[i]);
+    text[pos++] = '\n';
+    for (int i = 0; i < 32; ++i) pos += snprintf(text + pos, sizeof(text) - (size_t)pos,
+                                                "%02x", verifier[i]);
+    text[pos++] = '\n';
+    if (write(fd, text, (size_t)pos) != pos || fsync(fd) != 0) {
+        close(fd);
+        unlink(path);
+        die("cannot write passkey record");
+    }
+    close(fd);
+    OPENSSL_cleanse(text, sizeof(text));
+}
+
+static void read_passkey_record(const char *path, uint8_t salt[16],
+                                int *iterations, uint8_t verifier[32])
+{
+    FILE *f = fopen(path, "r");
+    if (!f) die("cannot open passkey record");
+    char magic[16], salt_hex[64], verifier_hex[96];
+    if (!fgets(magic, sizeof(magic), f) || strcmp(magic, "CSPIN1\n") != 0 ||
+        fscanf(f, "%d\n%63s\n%95s", iterations, salt_hex, verifier_hex) != 3) {
+        fclose(f);
+        die("invalid passkey record");
+    }
+    fclose(f);
+    if (*iterations < 10000 || *iterations > 2000000)
+        die("invalid passkey iteration count");
+    size_t salt_len, verifier_len;
+    uint8_t *salt_raw = hex_decode(salt_hex, &salt_len);
+    uint8_t *verifier_raw = hex_decode(verifier_hex, &verifier_len);
+    if (salt_len != 16 || verifier_len != 32) die("invalid passkey record fields");
+    memcpy(salt, salt_raw, 16);
+    memcpy(verifier, verifier_raw, 32);
+    OPENSSL_cleanse(salt_raw, salt_len);
+    OPENSSL_cleanse(verifier_raw, verifier_len);
+    free(salt_raw);
+    free(verifier_raw);
+}
+
+static void compressed_pubkey(const BIGNUM *d, uint8_t out[33])
+{
+    Point g = point_new(), q = point_new();
+    point_generator(&g);
+    scalar_mul(&q, d, &g);
+    if (q.infinity) die("invalid public key");
+    out[0] = BN_is_odd(q.y) ? 0x03 : 0x02;
+    if (BN_bn2binpad(q.x, out + 1, 32) != 32) die_ssl("pubkey serialization");
+    point_free(&g);
+    point_free(&q);
+}
+
+static void buf_init(Buffer *b, size_t cap)
+{
+    b->p = malloc(cap);
+    if (!b->p) die("out of memory");
+    b->len = 0;
+    b->cap = cap;
+}
+
+static void buf_put(Buffer *b, const void *p, size_t n)
+{
+    if (b->len + n > b->cap) {
+        size_t cap = (b->len + n) * 2 + 64;
+        uint8_t *q = realloc(b->p, cap);
+        if (!q) die("out of memory");
+        b->p = q;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, p, n);
+    b->len += n;
+}
+
+static void buf_u8(Buffer *b, uint8_t v)
+{
+    buf_put(b, &v, 1);
+}
+
+static void buf_u32le(Buffer *b, uint32_t v)
+{
+    uint8_t x[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+    buf_put(b, x, 4);
+}
+
+static void buf_u64le(Buffer *b, uint64_t v)
+{
+    uint8_t x[8];
+    for (int i = 0; i < 8; ++i) x[i] = (uint8_t)(v >> (8 * i));
+    buf_put(b, x, 8);
+}
+
+static void buf_varint(Buffer *b, uint64_t v)
+{
+    if (v < 0xfd) {
+        buf_u8(b, (uint8_t)v);
+    } else if (v <= 0xffff) {
+        uint8_t x[3] = {0xfd, (uint8_t)v, (uint8_t)(v >> 8)};
+        buf_put(b, x, sizeof(x));
+    } else if (v <= 0xffffffffULL) {
+        buf_u8(b, 0xfe);
+        buf_u32le(b, (uint32_t)v);
+    } else {
+        buf_u8(b, 0xff);
+        buf_u64le(b, v);
+    }
+}
+
+static uint64_t read_u64le(const uint8_t *p)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= ((uint64_t)p[i]) << (8 * i);
+    return v;
+}
+
+static uint32_t read_u32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t parse_varint(const uint8_t *p, size_t len, size_t *used)
+{
+    if (!len) die("truncated CompactSize");
+    if (p[0] < 0xfd) {
+        *used = 1;
+        return p[0];
+    }
+    if (p[0] == 0xfd) {
+        if (len < 3) die("truncated CompactSize");
+        *used = 3;
+        return (uint64_t)p[1] | ((uint64_t)p[2] << 8);
+    }
+    if (p[0] == 0xfe) {
+        if (len < 5) die("truncated CompactSize");
+        *used = 5;
+        return (uint64_t)p[1] | ((uint64_t)p[2] << 8) |
+               ((uint64_t)p[3] << 16) | ((uint64_t)p[4] << 24);
+    }
+    if (len < 9) die("truncated CompactSize");
+    *used = 9;
+    return read_u64le(p + 1);
+}
+
+static void parse_unsigned_tx(const uint8_t *raw, size_t len, ParsedTx *t)
+{
+    if (len < 10) die("transaction too short");
+    size_t off = 0, used;
+    memset(t, 0, sizeof(*t));
+    t->raw = raw;
+    t->raw_len = len;
+    t->version = raw;
+    off += 4;
+
+    if (raw[off] == 0x00 && off + 1 < len && raw[off + 1] != 0x00)
+        die("input transaction must be unsigned non-witness serialization");
+
+    t->vin_count = raw + off;
+    uint64_t vin_n = parse_varint(raw + off, len - off, &used);
+    t->vin_count_len = used;
+    off += used;
+    if (vin_n != 1) die("reference signer supports exactly one input");
+
+    size_t input_start = off;
+    if (off + 36 > len) die("truncated input outpoint");
+    t->outpoint = raw + off;
+    off += 36;
+    uint64_t script_len = parse_varint(raw + off, len - off, &used);
+    off += used;
+    if (script_len != 0) die("unsigned input scriptSig must be empty");
+    if (off + script_len + 4 > len) die("truncated input");
+    off += script_len;
+    t->sequence = raw + off;
+    off += 4;
+    t->input = raw + input_start;
+    t->input_len = off - input_start;
+
+    t->vout_count = raw + off;
+    uint64_t vout_n = parse_varint(raw + off, len - off, &used);
+    t->output_count = vout_n;
+    t->vout_count_len = used;
+    off += used;
+    if (vout_n == 0) die("transaction has no outputs");
+    size_t outputs_start = off;
+    for (uint64_t i = 0; i < vout_n; ++i) {
+        if (off + 8 > len) die("truncated output value");
+        off += 8;
+        uint64_t sl = parse_varint(raw + off, len - off, &used);
+        off += used;
+        if (sl > len - off) die("truncated output script");
+        off += (size_t)sl;
+    }
+    t->outputs = raw + outputs_start;
+    t->outputs_len = off - outputs_start;
+    if (off + 4 != len) die("unexpected bytes after locktime");
+    t->locktime = raw + off;
+}
+
+static void parse_tx_outputs(const ParsedTx *t, TxOutput *outputs, size_t cap)
+{
+    if (t->output_count > cap) die("too many transaction outputs");
+    size_t off = 0;
+    for (uint64_t i = 0; i < t->output_count; ++i) {
+        if (off + 8 > t->outputs_len) die("truncated transaction output");
+        outputs[i].amount_sat = read_u64le(t->outputs + off);
+        off += 8;
+        size_t used;
+        uint64_t script_len = parse_varint(t->outputs + off,
+                                           t->outputs_len - off, &used);
+        off += used;
+        if (script_len > t->outputs_len - off) die("truncated output script");
+        outputs[i].script = t->outputs + off;
+        outputs[i].script_len = (size_t)script_len;
+        off += (size_t)script_len;
+    }
+    if (off != t->outputs_len) die("unexpected transaction output bytes");
+}
+
+static uint64_t psbt_read_varint(const uint8_t *raw, size_t len, size_t *off)
+{
+    size_t used;
+    if (*off >= len) die("truncated PSBT CompactSize");
+    uint64_t value = parse_varint(raw + *off, len - *off, &used);
+    *off += used;
+    return value;
+}
+
+static void psbt_skip_map(const uint8_t *raw, size_t len, size_t *off)
+{
+    for (;;) {
+        uint64_t key_len = psbt_read_varint(raw, len, off);
+        if (key_len == 0) return;
+        if (key_len > len - *off) die("truncated PSBT key");
+        *off += (size_t)key_len;
+        uint64_t value_len = psbt_read_varint(raw, len, off);
+        if (value_len > len - *off) die("truncated PSBT value");
+        *off += (size_t)value_len;
+    }
+}
+
+static void parse_psbt(const char *psbt64, ParsedPsbt *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->raw = base64_decode(psbt64, &p->raw_len);
+    static const uint8_t magic[5] = {'p','s','b','t',0xff};
+    if (p->raw_len < sizeof(magic) || memcmp(p->raw, magic, sizeof(magic)) != 0)
+        die("invalid PSBT magic");
+
+    size_t off = sizeof(magic);
+    int have_unsigned_tx = 0;
+    for (;;) {
+        uint64_t key_len = psbt_read_varint(p->raw, p->raw_len, &off);
+        if (key_len == 0) break;
+        if (key_len > p->raw_len - off) die("truncated PSBT global key");
+        const uint8_t *key = p->raw + off;
+        off += (size_t)key_len;
+        uint64_t value_len = psbt_read_varint(p->raw, p->raw_len, &off);
+        if (value_len > p->raw_len - off) die("truncated PSBT global value");
+        const uint8_t *value = p->raw + off;
+        off += (size_t)value_len;
+        if (key[0] == 0x00) {
+            if (key_len != 1 || have_unsigned_tx) die("invalid duplicate unsigned transaction");
+            p->unsigned_tx = value;
+            p->unsigned_tx_len = (size_t)value_len;
+            have_unsigned_tx = 1;
+        } else if (key[0] == 0xfb) {
+            if (key_len != 1 || value_len != 4 || read_u32le(value) != 0)
+                die("only PSBT version 0 is supported");
+        }
+    }
+    if (!have_unsigned_tx) die("PSBT has no unsigned transaction");
+    parse_unsigned_tx(p->unsigned_tx, p->unsigned_tx_len, &p->tx);
+
+    int have_witness_utxo = 0;
+    int have_sighash = 0;
+    for (;;) {
+        size_t key_start = off;
+        uint64_t key_len = psbt_read_varint(p->raw, p->raw_len, &off);
+        if (key_len == 0) {
+            p->input_separator_offset = key_start;
+            break;
+        }
+        if (key_len > p->raw_len - off) die("truncated PSBT input key");
+        const uint8_t *key = p->raw + off;
+        off += (size_t)key_len;
+        uint64_t value_len = psbt_read_varint(p->raw, p->raw_len, &off);
+        if (value_len > p->raw_len - off) die("truncated PSBT input value");
+        const uint8_t *value = p->raw + off;
+        off += (size_t)value_len;
+
+        if (key[0] == 0x01) {
+            if (key_len != 1 || have_witness_utxo || value_len < 9)
+                die("invalid duplicate witness UTXO");
+            p->prevout_sat = read_u64le(value);
+            size_t voff = 8, used;
+            uint64_t script_len = parse_varint(value + voff,
+                                               (size_t)value_len - voff, &used);
+            voff += used;
+            if (script_len > value_len - voff || voff + script_len != value_len)
+                die("invalid witness UTXO script");
+            p->prevout_script = value + voff;
+            p->prevout_script_len = (size_t)script_len;
+            have_witness_utxo = 1;
+        } else if (key[0] == 0x02) {
+            p->has_partial_signature = 1;
+        } else if (key[0] == 0x03) {
+            if (key_len != 1 || value_len != 4 || have_sighash)
+                die("invalid PSBT sighash field");
+            uint32_t sighash = read_u32le(value);
+            if (sighash != 1) die("only SIGHASH_ALL is supported");
+            have_sighash = 1;
+        } else if (key[0] == 0x07 || key[0] == 0x08) {
+            die("PSBT input is already finalized");
+        }
+    }
+    if (!have_witness_utxo) die("PSBT input has no witness UTXO");
+
+    for (uint64_t i = 0; i < p->tx.output_count; ++i)
+        psbt_skip_map(p->raw, p->raw_len, &off);
+    if (off != p->raw_len) die("unexpected bytes after PSBT maps");
+}
+
+static void bip143_sighash(const ParsedTx *t, const uint8_t pubkey_hash[20],
+                           uint64_t amount_sat, uint8_t out[32])
+{
+    uint8_t hp[32], hs[32], ho[32];
+    sha256d(t->outpoint, 36, hp);
+    sha256d(t->sequence, 4, hs);
+    sha256d(t->outputs, t->outputs_len, ho);
+
+    uint8_t script_code[26] = {
+        0x19, 0x76, 0xa9, 0x14,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0x88, 0xac
+    };
+    memcpy(script_code + 4, pubkey_hash, 20);
+
+    Buffer b;
+    buf_init(&b, 182);
+    buf_put(&b, t->version, 4);
+    buf_put(&b, hp, 32);
+    buf_put(&b, hs, 32);
+    buf_put(&b, t->outpoint, 36);
+    buf_put(&b, script_code, sizeof(script_code));
+    buf_u64le(&b, amount_sat);
+    buf_put(&b, t->sequence, 4);
+    buf_put(&b, ho, 32);
+    buf_put(&b, t->locktime, 4);
+    buf_u32le(&b, 1); /* SIGHASH_ALL */
+    sha256d(b.p, b.len, out);
+    OPENSSL_cleanse(b.p, b.cap);
+    free(b.p);
+}
+
+/* RFC6979 section 3.2, using SHA256 and bits2octets(h1). */
+static BIGNUM *rfc6979_nonce(const BIGNUM *d, const uint8_t digest[32])
+{
+    uint8_t x[32], h1[32], K[32], V[32], data[97];
+    bn_to_32(d, x);
+
+    BIGNUM *h_bn = BN_bin2bn(digest, 32, NULL);
+    BIGNUM *h_mod = BN_new();
+    BN_mod(h_mod, h_bn, N_ORDER, CTX);
+    bn_to_32(h_mod, h1);
+    BN_free(h_bn);
+    BN_free(h_mod);
+
+    memset(K, 0x00, 32);
+    memset(V, 0x01, 32);
+
+    memcpy(data, V, 32);
+    data[32] = 0x00;
+    memcpy(data + 33, x, 32);
+    memcpy(data + 65, h1, 32);
+    hmac256(K, data, 97, K);
+    hmac256(K, V, 32, V);
+
+    memcpy(data, V, 32);
+    data[32] = 0x01;
+    memcpy(data + 33, x, 32);
+    memcpy(data + 65, h1, 32);
+    hmac256(K, data, 97, K);
+    hmac256(K, V, 32, V);
+
+    for (;;) {
+        hmac256(K, V, 32, V);
+        BIGNUM *k = BN_bin2bn(V, 32, NULL);
+        if (k && !BN_is_zero(k) && BN_cmp(k, N_ORDER) < 0) {
+            OPENSSL_cleanse(x, sizeof(x));
+            OPENSSL_cleanse(h1, sizeof(h1));
+            OPENSSL_cleanse(K, sizeof(K));
+            OPENSSL_cleanse(V, sizeof(V));
+            OPENSSL_cleanse(data, sizeof(data));
+            return k;
+        }
+        BN_free(k);
+        memcpy(data, V, 32);
+        data[32] = 0x00;
+        hmac256(K, data, 33, K);
+        hmac256(K, V, 32, V);
+    }
+}
+
+static void ecdsa_sign(const BIGNUM *d, const uint8_t digest[32],
+                       BIGNUM *r, BIGNUM *s)
+{
+    Point g = point_new(), R = point_new();
+    point_generator(&g);
+    BIGNUM *z = BN_bin2bn(digest, 32, NULL);
+
+    for (;;) {
+        BIGNUM *k = rfc6979_nonce(d, digest);
+        scalar_mul(&R, k, &g);
+        BN_mod(r, R.x, N_ORDER, CTX);
+        if (BN_is_zero(r)) {
+            BN_free(k);
+            continue;
+        }
+
+        BN_CTX_start(CTX);
+        BIGNUM *kinv = BN_CTX_get(CTX);
+        BIGNUM *tmp = BN_CTX_get(CTX);
+        if (!tmp) die_ssl("BN_CTX ecdsa_sign");
+        if (!BN_mod_inverse(kinv, k, N_ORDER, CTX)) die_ssl("ECDSA inverse");
+        BN_mod_mul(tmp, r, d, N_ORDER, CTX);
+        BN_mod_add(tmp, tmp, z, N_ORDER, CTX);
+        BN_mod_mul(s, kinv, tmp, N_ORDER, CTX);
+        BN_CTX_end(CTX);
+        BN_free(k);
+        if (!BN_is_zero(s)) break;
+    }
+
+    /* Bitcoin standardness: normalize to low-S. */
+    if (BN_cmp(s, N_HALF) > 0) BN_sub(s, N_ORDER, s);
+    BN_free(z);
+    point_free(&g);
+    point_free(&R);
+}
+
+static int ecdsa_verify(const Point *q, const uint8_t digest[32],
+                        const BIGNUM *r, const BIGNUM *s)
+{
+    if (BN_is_zero(r) || BN_cmp(r, N_ORDER) >= 0 ||
+        BN_is_zero(s) || BN_cmp(s, N_ORDER) >= 0) return 0;
+
+    BIGNUM *z = BN_bin2bn(digest, 32, NULL);
+    BIGNUM *w = BN_mod_inverse(NULL, s, N_ORDER, CTX);
+    BIGNUM *u1 = BN_new(), *u2 = BN_new(), *v = BN_new();
+    BN_mod_mul(u1, z, w, N_ORDER, CTX);
+    BN_mod_mul(u2, r, w, N_ORDER, CTX);
+
+    Point g = point_new(), a = point_new(), b = point_new(), sum = point_new();
+    point_generator(&g);
+    scalar_mul(&a, u1, &g);
+    scalar_mul(&b, u2, q);
+    point_add(&sum, &a, &b);
+    int ok = 0;
+    if (!sum.infinity) {
+        BN_mod(v, sum.x, N_ORDER, CTX);
+        ok = BN_cmp(v, r) == 0;
+    }
+
+    BN_free(z); BN_free(w); BN_free(u1); BN_free(u2); BN_free(v);
+    point_free(&g); point_free(&a); point_free(&b); point_free(&sum);
+    return ok;
+}
+
+static size_t der_integer(const BIGNUM *v, uint8_t *out)
+{
+    int n = BN_num_bytes(v);
+    uint8_t tmp[33];
+    BN_bn2bin(v, tmp + 1);
+    int pad = (tmp[1] & 0x80) != 0;
+    out[0] = 0x02;
+    out[1] = (uint8_t)(n + pad);
+    if (pad) out[2] = 0x00;
+    memcpy(out + 2 + pad, tmp + 1, n);
+    return (size_t)(2 + n + pad);
+}
+
+static size_t der_signature(const BIGNUM *r, const BIGNUM *s, uint8_t out[72])
+{
+    uint8_t body[70];
+    size_t rn = der_integer(r, body);
+    size_t sn = der_integer(s, body + rn);
+    out[0] = 0x30;
+    out[1] = (uint8_t)(rn + sn);
+    memcpy(out + 2, body, rn + sn);
+    return 2 + rn + sn;
+}
+
+#define MAX_PSBT_OUTPUTS 16
+#define MAX_SIGNER_FEE_SAT 1000000ULL
+#define MAX_MONEY_SAT 2100000000000000ULL
+
+static void psbt_freeze_id(const ParsedPsbt *p, uint8_t freeze[32])
+{
+    sha256_once(p->raw, p->raw_len, freeze);
+}
+
+static void validate_psbt(const BIGNUM *d, ParsedPsbt *p,
+                          TxOutput outputs[MAX_PSBT_OUTPUTS],
+                          uint8_t pub[33], uint8_t pubkey_hash[20],
+                          char source_address[91], uint64_t *total_out,
+                          uint64_t *fee, size_t *recipient_count,
+                          size_t *change_count)
+{
+    if (p->has_partial_signature)
+        die("PSBT already contains a partial signature");
+    if (p->tx.output_count == 0 || p->tx.output_count > MAX_PSBT_OUTPUTS)
+        die("unsupported PSBT output count");
+
+    compressed_pubkey(d, pub);
+    hash160(pub, 33, pubkey_hash);
+    p2wpkh_regtest_address(pubkey_hash, source_address);
+    uint8_t source_script[22] = {0x00, 0x14};
+    memcpy(source_script + 2, pubkey_hash, 20);
+    if (p->prevout_script_len != sizeof(source_script) ||
+        memcmp(p->prevout_script, source_script, sizeof(source_script)) != 0)
+        die("PSBT input does not belong to this C-signer key");
+
+    parse_tx_outputs(&p->tx, outputs, MAX_PSBT_OUTPUTS);
+    *total_out = 0;
+    *recipient_count = 0;
+    *change_count = 0;
+    for (uint64_t i = 0; i < p->tx.output_count; ++i) {
+        TxOutput *o = &outputs[i];
+        if (o->amount_sat > MAX_MONEY_SAT || *total_out > MAX_MONEY_SAT - o->amount_sat)
+            die("invalid or overflowing output amount");
+        if (o->script_len != 22 || o->script[0] != 0x00 || o->script[1] != 0x14)
+            die("only native P2WPKH Regtest outputs are supported");
+        *total_out += o->amount_sat;
+        if (memcmp(o->script, source_script, sizeof(source_script)) == 0)
+            (*change_count)++;
+        else
+            (*recipient_count)++;
+    }
+    if (*recipient_count != 1) die("PSBT must contain exactly one recipient output");
+    if (*change_count > 1) die("PSBT contains more than one change output");
+    if (p->prevout_sat > MAX_MONEY_SAT || *total_out > p->prevout_sat)
+        die("PSBT outputs exceed the input amount");
+    *fee = p->prevout_sat - *total_out;
+    if (*fee == 0 || *fee > MAX_SIGNER_FEE_SAT)
+        die("PSBT fee is zero or exceeds the C-signer safety limit");
+}
+
+static void print_psbt_review(const ParsedPsbt *p, const TxOutput *outputs,
+                              const uint8_t pubkey_hash[20],
+                              const char *source_address, uint64_t total_out,
+                              uint64_t fee, size_t recipient_count,
+                              size_t change_count, const uint8_t freeze[32])
+{
+    (void)recipient_count;
+    (void)change_count;
+    printf("{\"network\":\"regtest\",\"verified\":true,");
+    printf("\"policy\":\"PSBTv0-1in-P2WPKH-SIGHASH_ALL\",");
+    printf("\"source_address\":\"%s\",", source_address);
+    printf("\"input_sat\":%llu,\"total_output_sat\":%llu,\"fee_sat\":%llu,",
+           (unsigned long long)p->prevout_sat,
+           (unsigned long long)total_out,
+           (unsigned long long)fee);
+    printf("\"freeze_id\":\""); hex_print(freeze, 32);
+    printf("\",\"outputs\":[");
+    for (uint64_t i = 0; i < p->tx.output_count; ++i) {
+        char address[91];
+        p2wpkh_regtest_address(outputs[i].script + 2, address);
+        int is_change = memcmp(outputs[i].script + 2, pubkey_hash, 20) == 0;
+        if (i) putchar(',');
+        printf("{\"index\":%llu,\"address\":\"%s\",\"amount_sat\":%llu,"
+               "\"role\":\"%s\"}",
+               (unsigned long long)i, address,
+               (unsigned long long)outputs[i].amount_sat,
+               is_change ? "change" : "recipient");
+    }
+    printf("]}\n");
+}
+
+static uint8_t *psbt_insert_signature(const ParsedPsbt *p, const uint8_t pub[33],
+                                      const uint8_t *der, size_t der_len,
+                                      size_t *signed_len)
+{
+    Buffer b;
+    buf_init(&b, p->raw_len + der_len + 48);
+    buf_put(&b, p->raw, p->input_separator_offset);
+    buf_varint(&b, 34);
+    buf_u8(&b, 0x02);
+    buf_put(&b, pub, 33);
+    buf_varint(&b, der_len + 1);
+    buf_put(&b, der, der_len);
+    buf_u8(&b, 0x01);
+    buf_put(&b, p->raw + p->input_separator_offset,
+            p->raw_len - p->input_separator_offset);
+    *signed_len = b.len;
+    return b.p;
+}
+
+static void cmd_inspect_psbt(const char *key, const char *psbt64)
+{
+    BIGNUM *d = read_key(key);
+    ParsedPsbt p;
+    parse_psbt(psbt64, &p);
+    TxOutput outputs[MAX_PSBT_OUTPUTS];
+    uint8_t pub[33], h160[20], freeze[32];
+    char source_address[91];
+    uint64_t total_out, fee;
+    size_t recipients, changes;
+    validate_psbt(d, &p, outputs, pub, h160, source_address,
+                  &total_out, &fee, &recipients, &changes);
+    psbt_freeze_id(&p, freeze);
+    print_psbt_review(&p, outputs, h160, source_address, total_out, fee,
+                      recipients, changes, freeze);
+    OPENSSL_cleanse(p.raw, p.raw_len);
+    free(p.raw);
+    BN_clear_free(d);
+}
+
+static void cmd_mcu_setup_passkey(const char *record_path)
+{
+    char first[64], second[64];
+    if (!read_hidden_line("Nhap ma mo khoa moi (6-12 chu so): ", first,
+                          sizeof(first)) ||
+        !valid_numeric_passkey(first))
+        die("passkey must contain 6-12 numeric digits");
+    if (!read_hidden_line("Nhap lai ma mo khoa: ", second, sizeof(second)))
+        die("cannot read passkey confirmation");
+    if (strcmp(first, second) != 0) die("passkey confirmation does not match");
+
+    uint8_t salt[16], verifier[32];
+    if (RAND_bytes(salt, sizeof(salt)) != 1) die_ssl("passkey salt generation");
+    derive_passkey_verifier(first, salt, PASSKEY_ITERATIONS, verifier);
+    write_passkey_record(record_path, salt, verifier);
+    OPENSSL_cleanse(first, sizeof(first));
+    OPENSSL_cleanse(second, sizeof(second));
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(verifier, sizeof(verifier));
+    printf("MCU_PASSKEY_SETUP_OK\nrecord=%s\n", record_path);
+}
+
+static int mcu_unlock(const char *record_path)
+{
+    uint8_t salt[16], expected[32], actual[32];
+    int iterations;
+    read_passkey_record(record_path, salt, &iterations, expected);
+    char passkey[64];
+    int unlocked = 0;
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        if (!read_hidden_line("Nhap ma mo khoa MCU: ", passkey, sizeof(passkey)))
+            break;
+        derive_passkey_verifier(passkey, salt, iterations, actual);
+        if (CRYPTO_memcmp(expected, actual, sizeof(expected)) == 0) {
+            unlocked = 1;
+            break;
+        }
+        fprintf(stderr, "Sai ma mo khoa (%d/3).\n", attempt);
+        OPENSSL_cleanse(passkey, sizeof(passkey));
+        OPENSSL_cleanse(actual, sizeof(actual));
+    }
+    OPENSSL_cleanse(passkey, sizeof(passkey));
+    OPENSSL_cleanse(salt, sizeof(salt));
+    OPENSSL_cleanse(expected, sizeof(expected));
+    OPENSSL_cleanse(actual, sizeof(actual));
+    return unlocked;
+}
+
+static void mcu_display_review(const ParsedPsbt *p, const TxOutput *outputs,
+                               const uint8_t h160[20], const char *source_address,
+                               uint64_t fee, const uint8_t freeze[32])
+{
+    printf("\n============================================================\n");
+    printf("       MAN HINH MCU - KIEM TRA GIAO DICH REGTEST\n");
+    printf("============================================================\n");
+    printf("Mang              : Bitcoin Regtest\n");
+    printf("Dia chi nguon     : %s\n", source_address);
+    printf("Tong dau vao      : %.8f BTC (%llu satoshi)\n",
+           (double)p->prevout_sat / 100000000.0,
+           (unsigned long long)p->prevout_sat);
+    for (uint64_t i = 0; i < p->tx.output_count; ++i) {
+        char address[91];
+        p2wpkh_regtest_address(outputs[i].script + 2, address);
+        int change = memcmp(outputs[i].script + 2, h160, 20) == 0;
+        printf("%s %-11llu: %s\n", change ? "Tien thua" : "Nguoi nhan",
+               (unsigned long long)i, address);
+        printf("  So tien          : %.8f BTC (%llu satoshi)\n",
+               (double)outputs[i].amount_sat / 100000000.0,
+               (unsigned long long)outputs[i].amount_sat);
+    }
+    printf("Phi giao dich     : %.8f BTC (%llu satoshi)\n",
+           (double)fee / 100000000.0, (unsigned long long)fee);
+    printf("freeze_id         : "); hex_print(freeze, 32); putchar('\n');
+    printf("============================================================\n");
+    printf("Bo dem PSBT da dong bang. Moi thay doi se bi tu choi.\n\n");
+    fflush(stdout);
+}
+
+static void cmd_mcu_sign_file(const char *key_path, const char *passkey_record,
+                              const char *input_path, const char *output_path)
+{
+    char *psbt64 = psbt_file_to_base64(input_path);
+    BIGNUM *d = read_key(key_path);
+    ParsedPsbt p;
+    parse_psbt(psbt64, &p);
+    OPENSSL_cleanse(psbt64, strlen(psbt64));
+    free(psbt64);
+
+    TxOutput outputs[MAX_PSBT_OUTPUTS];
+    uint8_t pub[33], h160[20], freeze_before[32], freeze_after[32], digest[32];
+    char source_address[91];
+    uint64_t total_out, fee;
+    size_t recipients, changes;
+    validate_psbt(d, &p, outputs, pub, h160, source_address,
+                  &total_out, &fee, &recipients, &changes);
+    psbt_freeze_id(&p, freeze_before);
+
+    mcu_display_review(&p, outputs, h160, source_address, fee, freeze_before);
+    if (!mcu_unlock(passkey_record)) {
+        fprintf(stderr, "MCU_REJECTED: qua 3 lan sai ma; PSBT da bi xoa khoi bo dem.\n");
+        OPENSSL_cleanse(p.raw, p.raw_len);
+        free(p.raw);
+        BN_clear_free(d);
+        exit(3);
+    }
+
+    char approval[32];
+    fprintf(stderr, "Nhan nut DONG Y bang cach nhap DONG Y; gia tri khac la HUY: ");
+    fflush(stderr);
+    if (!fgets(approval, sizeof(approval), stdin)) approval[0] = '\0';
+    size_t approval_len = strlen(approval);
+    while (approval_len && (approval[approval_len - 1] == '\n' ||
+                            approval[approval_len - 1] == '\r'))
+        approval[--approval_len] = '\0';
+    if (strcmp(approval, "DONG Y") != 0) {
+        fprintf(stderr, "MCU_CANCELLED: nguoi dung da HUY; khong tao chu ky.\n");
+        OPENSSL_cleanse(approval, sizeof(approval));
+        OPENSSL_cleanse(p.raw, p.raw_len);
+        free(p.raw);
+        BN_clear_free(d);
+        exit(4);
+    }
+    OPENSSL_cleanse(approval, sizeof(approval));
+
+    psbt_freeze_id(&p, freeze_after);
+    if (CRYPTO_memcmp(freeze_before, freeze_after, 32) != 0) {
+        OPENSSL_cleanse(p.raw, p.raw_len);
+        free(p.raw);
+        BN_clear_free(d);
+        die("PSBT buffer changed after review; signing rejected");
+    }
+
+    bip143_sighash(&p.tx, h160, p.prevout_sat, digest);
+    BIGNUM *r = BN_new(), *s = BN_new();
+    ecdsa_sign(d, digest, r, s);
+    Point g = point_new(), q = point_new();
+    point_generator(&g);
+    scalar_mul(&q, d, &g);
+    if (!ecdsa_verify(&q, digest, r, s)) die("ECDSA self-verification failed");
+
+    uint8_t der[72];
+    size_t der_len = der_signature(r, s, der);
+    size_t signed_len;
+    uint8_t *signed_raw = psbt_insert_signature(&p, pub, der, der_len,
+                                                &signed_len);
+    write_binary_file_exclusive(output_path, signed_raw, signed_len);
+
+    printf("MCU_SIGN_OK\n");
+    printf("freeze_id="); hex_print(freeze_before, 32); putchar('\n');
+    printf("sighash="); hex_print(digest, 32); putchar('\n');
+    printf("signature_verified=true\n");
+    printf("signed_psbt_file=%s\n", output_path);
+
+    OPENSSL_cleanse(p.raw, p.raw_len);
+    OPENSSL_cleanse(signed_raw, signed_len);
+    OPENSSL_cleanse(digest, sizeof(digest));
+    OPENSSL_cleanse(der, sizeof(der));
+    free(p.raw); free(signed_raw);
+    BN_clear_free(d); BN_clear_free(r); BN_clear_free(s);
+    point_free(&g); point_free(&q);
+}
+
+static void cmd_keygen(const char *path)
+{
+    uint8_t raw[32];
+    BIGNUM *d = NULL;
+    do {
+        if (RAND_bytes(raw, sizeof(raw)) != 1) die_ssl("RAND_bytes");
+        BN_free(d);
+        d = BN_bin2bn(raw, 32, NULL);
+    } while (!d || BN_is_zero(d) || BN_cmp(d, N_ORDER) >= 0);
+    write_key(path, raw);
+    OPENSSL_cleanse(raw, sizeof(raw));
+    BN_free(d);
+    printf("created %s (mode 0600)\n", path);
+}
+
+static void cmd_info(const char *path)
+{
+    BIGNUM *d = read_key(path);
+    uint8_t pub[33], h160[20];
+    compressed_pubkey(d, pub);
+    hash160(pub, sizeof(pub), h160);
+    printf("{\"pubkey\":\"");
+    hex_print(pub, sizeof(pub));
+    printf("\",\"pubkey_hash\":\"");
+    hex_print(h160, sizeof(h160));
+    printf("\",\"script_pubkey\":\"0014");
+    hex_print(h160, sizeof(h160));
+    printf("\"}\n");
+    BN_clear_free(d);
+}
+
+static void cmd_selftest(void)
+{
+    /* Fixed private key and digest make this a deterministic regression test. */
+    BIGNUM *d = NULL;
+    BN_hex2bn(&d, "1E99423A4ED27608A15A2616A2B0E9E52CED330AC530EDCC32C8FFC6A526AEDD");
+    uint8_t digest[32];
+    sha256_once((const uint8_t *)"cold-wallet-verilog-reference", 29, digest);
+    BIGNUM *r = BN_new(), *s = BN_new();
+    ecdsa_sign(d, digest, r, s);
+
+    Point g = point_new(), q = point_new();
+    point_generator(&g);
+    scalar_mul(&q, d, &g);
+    if (!ecdsa_verify(&q, digest, r, s)) die("ECDSA self-test failed");
+
+    uint8_t der[72];
+    size_t der_len = der_signature(r, s, der);
+    printf("SELFTEST_OK\n");
+    printf("digest="); hex_print(digest, 32); putchar('\n');
+    printf("r="); {
+        uint8_t x[32]; bn_to_32(r, x); hex_print(x, 32); putchar('\n');
+    }
+    printf("s="); {
+        uint8_t x[32]; bn_to_32(s, x); hex_print(x, 32); putchar('\n');
+    }
+    printf("der="); hex_print(der, der_len); putchar('\n');
+
+    BN_clear_free(d); BN_clear_free(r); BN_clear_free(s);
+    point_free(&g); point_free(&q);
+}
+
+static void usage(const char *argv0)
+{
+    fprintf(stderr,
+        "Usage:\n"
+        "  %s keygen KEYFILE\n"
+        "  %s info KEYFILE\n"
+        "  %s mcu-setup-passkey PASSKEY_RECORD\n"
+        "  %s mcu-sign-file KEYFILE PASSKEY_RECORD INPUT.psbt OUTPUT.psbt\n"
+        "  %s inspect-psbt KEYFILE PSBT_BASE64\n"
+        "  %s selftest\n\n"
+        "Direct sign-digest/sign-p2wpkh/sign-psbt commands are disabled.\n"
+        "All transaction signing must pass through mcu-sign-file.\n",
+        argv0, argv0, argv0, argv0, argv0, argv0);
+    exit(2);
+}
+
+int main(int argc, char **argv)
+{
+    curve_init();
+    if (argc == 3 && strcmp(argv[1], "keygen") == 0)
+        cmd_keygen(argv[2]);
+    else if (argc == 3 && strcmp(argv[1], "info") == 0)
+        cmd_info(argv[2]);
+    else if (argc == 3 && strcmp(argv[1], "mcu-setup-passkey") == 0)
+        cmd_mcu_setup_passkey(argv[2]);
+    else if (argc == 6 && strcmp(argv[1], "mcu-sign-file") == 0)
+        cmd_mcu_sign_file(argv[2], argv[3], argv[4], argv[5]);
+    else if (argc == 4 && strcmp(argv[1], "inspect-psbt") == 0)
+        cmd_inspect_psbt(argv[2], argv[3]);
+    else if (argc == 2 && strcmp(argv[1], "selftest") == 0)
+        cmd_selftest();
+    else
+        usage(argv[0]);
+    curve_free();
+    return 0;
+}
