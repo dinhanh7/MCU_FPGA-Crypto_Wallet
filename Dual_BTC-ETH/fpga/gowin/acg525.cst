@@ -1,0 +1,11 @@
+// DK_START_GW5A-LV25UG324; verify these header pins against your ACG525 PCB.
+IO_LOC "clk_in_50m" T9;
+IO_PORT "clk_in_50m" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC "led_busy" N16;
+IO_PORT "led_busy" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "led_pass" C17;
+IO_PORT "led_pass" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC "uart_tx" V8;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC "uart_rx" U8;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;

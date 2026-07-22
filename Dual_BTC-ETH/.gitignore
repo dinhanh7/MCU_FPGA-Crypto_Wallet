@@ -1,0 +1,8 @@
+mcu/build/
+mcu/bin/
+fpga/build/
+fpga/gowin/impl/
+web/ethereum/wallets/
+web/runtime/*.json
+**/__pycache__/
+*.pyc

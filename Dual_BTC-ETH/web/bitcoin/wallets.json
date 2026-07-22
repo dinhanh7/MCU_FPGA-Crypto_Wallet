@@ -1,0 +1,28 @@
+{
+  "wallets": [
+    {
+      "name": "coldwatch",
+      "core_wallet": "coldwatch",
+      "pubkey": "0340c1ad1ae43fba0a0a75fed4e3101d4222d8d03698f7008c3ccb50b608199771",
+      "mcu_key_hint": "cold.key"
+    },
+    {
+      "name": "cstest",
+      "core_wallet": "c_cstest",
+      "pubkey": "03357a7645d2841741f81fbfdcc41e96f3eab096d74cf21a8cf06404b380008bf5",
+      "mcu_key_hint": "cstest.key"
+    },
+    {
+      "name": "danh_c",
+      "core_wallet": "c_danh_c",
+      "pubkey": "02225de7c8267ab7790f3e931d70d1ec687be614cc7b2f66ff1904825f47305786",
+      "mcu_key_hint": "danh_c.key"
+    },
+    {
+      "name": "fpga_d1_e2e",
+      "core_wallet": "c_fpga_d1_e2e",
+      "pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "mcu_key_hint": "mcu/test-data/fpga_test_d1.pub"
+    }
+  ]
+}
