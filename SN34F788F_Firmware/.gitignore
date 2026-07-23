@@ -1,0 +1,8 @@
+# Keil build outputs
+Objects/
+Listings/
+*.log
+
+# Keil per-user workspace settings
+*.uvguix.*
+*.uvoptx
